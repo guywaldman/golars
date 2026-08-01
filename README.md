@@ -34,7 +34,7 @@ uses the immutable package default engine and does not manage a session.
 - Engine-wide memory accounting with a 1 GiB default quota and contextual
   cancellation through `context.Context`.
 
-## Milestone 2
+## Query planning and storage
 
 - Lazy scans derive the columns required by a terminal projection and its
   filters. Parquet reads only those Arrow columns; CSV and JSON readers apply
@@ -55,9 +55,20 @@ Run the emulator suite on a machine with Docker:
 go test -tags=e2e ./... -count=1 -v
 ```
 
-The E2E tests skip when Docker is unavailable. Remote Parquet/IPC objects are
-currently materialized before decoding; row-group predicate pruning and
-streaming remote range reads remain later milestones.
+The E2E tests skip when Docker is unavailable. Remote Parquet/IPC objects that
+do not expose the optional range interface are materialized before decoding.
+
+## Streaming and predicate pruning
+
+- `RangeObjectStore` enables bounded random-access reads. The S3 and GCS
+  adapters implement object stats and range reads; older stores keep the
+  materializing fallback.
+- Safe simple predicates (`=`, `!=`, `<`, `<=`, `>`, `>=`, `is_null`, and
+  `is_not_null`) prune Parquet row groups when valid min/max statistics exist.
+- `LazyFrame.ForEachBatch` executes incrementally, and `LazyFrame.Sink` writes
+  Parquet batches without first collecting the complete frame.
+- Regression tests cover row-group selection, range-only reads, batch
+  iteration, and streaming sinks.
 
 ## Examples
 
@@ -93,3 +104,10 @@ df, err := engine.ScanParquet("s3://bucket/events/*.parquet").Collect(ctx)
 The implementation is intentionally a fast-breaking v0 API. The execution
 kernel and format contracts are stable enough for experimentation, while the
 public type names and richer Polars parity surface will continue to grow.
+
+## Benchmarking
+
+The [`benchmarks`](benchmarks) directory contains equivalent Go and Rust
+Polars workloads over the same generated Parquet input. The runners report
+timing, allocation, result-cardinality, and memory metrics; see
+[`benchmarks/README.md`](benchmarks/README.md) for reproducible commands.

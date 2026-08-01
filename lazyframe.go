@@ -137,7 +137,11 @@ func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 	defer recoverMemoryLimit(&err)
 	if lf.plan != nil && lf.plan.kind == planGroupBy {
 		base := &LazyFrame{engine: lf.engine, plan: lf.plan.input}
-		input, collectErr := base.Collect(ctx)
+		request := deriveGroupByScanRequest(lf.plan.input, lf.plan.keys, lf.plan.exprs)
+		if spec, ok := makeFastGroupBySpec(lf.plan.keys, lf.plan.exprs); ok {
+			return executeFastGroupBy(ctx, base, request, spec)
+		}
+		input, collectErr := base.collectWithScanRequest(ctx, &request)
 		if collectErr != nil {
 			return nil, collectErr
 		}
@@ -162,30 +166,81 @@ func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 	return &DataFrame{table: table, engine: lf.engine}, nil
 }
 
-func (lf *LazyFrame) Sink(ctx context.Context, destination string, options ...WriteOption) error {
-	df, err := lf.Collect(ctx)
-	if err != nil {
+// ForEachBatch executes a lazy plan incrementally. The callback receives a
+// borrowed record batch that remains valid for the duration of the callback;
+// retain it if it must outlive the callback. This is the streaming escape hatch
+// for scans that should not first materialize a complete DataFrame.
+func (lf *LazyFrame) ForEachBatch(ctx context.Context, callback func(arrow.RecordBatch) error) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if lf == nil {
+		return ErrClosed
+	}
+	if callback == nil {
+		return fmt.Errorf("%w: nil batch callback", ErrInvalidPlan)
+	}
+	if lf.err != nil {
+		return lf.err
+	}
+	if err := lf.engine.checkOpen(); err != nil {
 		return err
 	}
-	defer df.Close()
-	return WriteParquet(ctx, df, destination, options...)
+	defer recoverMemoryLimit(&err)
+	if lf.plan == nil {
+		return ErrInvalidPlan
+	}
+	if lf.plan.kind == planGroupBy || lf.plan.kind == planSort {
+		df, collectErr := lf.Collect(ctx)
+		if collectErr != nil {
+			return collectErr
+		}
+		defer df.Close()
+		reader := newTableSource(df.table, lf.engine.batchSize)
+		defer reader.Release()
+		emitted := false
+		for reader.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			batch := reader.RecordBatch()
+			emitted = true
+			batch.Retain()
+			callbackErr := callback(batch)
+			batch.Release()
+			if callbackErr != nil {
+				return callbackErr
+			}
+		}
+		if err := reader.Err(); err != nil {
+			return err
+		}
+		if emitted || reader.Schema() == nil {
+			return nil
+		}
+		empty, err := emptyRecordBatch(reader.Schema(), lf.engine.allocator)
+		if err != nil {
+			return err
+		}
+		callbackErr := callback(empty)
+		empty.Release()
+		return callbackErr
+	}
+	return lf.executeBatches(ctx, callback)
+}
+
+func (lf *LazyFrame) Sink(ctx context.Context, destination string, options ...WriteOption) error {
+	return writeParquetBatches(ctx, lf, destination, options...)
 }
 
 func (lf *LazyFrame) CollectBatches(ctx context.Context) ([]arrow.RecordBatch, error) {
-	df, err := lf.Collect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer df.Close()
-	reader := newTableSource(df.table, lf.engine.batchSize)
 	var batches []arrow.RecordBatch
-	for reader.Next() {
-		batch := reader.RecordBatch()
+	err := lf.ForEachBatch(ctx, func(batch arrow.RecordBatch) error {
 		batch.Retain()
 		batches = append(batches, batch)
-	}
-	reader.Release()
-	if err := reader.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		for _, batch := range batches {
 			batch.Release()
 		}

@@ -20,6 +20,7 @@ type tableSource struct {
 
 type scanRequest struct {
 	columns []string
+	filters []*exprNode
 }
 
 type scanRequestContextKey struct{}
@@ -38,10 +39,15 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		return scanRequest{}
 	}
 	columns := make(map[string]struct{})
+	var requestFilters []*exprNode
 	for _, node := range nodes[1 : len(nodes)-1] {
 		switch node.kind {
 		case planFilter:
-			collectExprColumns(node.exprs[0].node, columns)
+			filter := node.exprs[0].node
+			collectExprColumns(filter, columns)
+			if filter != nil {
+				requestFilters = append(requestFilters, filter)
+			}
 		case planLimit:
 			// Limits do not require additional columns.
 		default:
@@ -62,7 +68,48 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		result = append(result, column)
 	}
 	sort.Strings(result)
-	return scanRequest{columns: result}
+	return scanRequest{columns: result, filters: requestFilters}
+}
+
+func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
+	if plan == nil {
+		return scanRequest{}
+	}
+	nodes := make([]*planNode, 0, 8)
+	for node := plan; node != nil; node = node.input {
+		nodes = append(nodes, node)
+	}
+	reversePlans(nodes)
+	columns := make(map[string]struct{})
+	for _, expr := range keys {
+		collectExprColumns(expr.node, columns)
+	}
+	for _, expr := range exprs {
+		collectExprColumns(expr.node, columns)
+	}
+	var filters []*exprNode
+	for _, node := range nodes[1:] {
+		switch node.kind {
+		case planFilter:
+			filter := node.exprs[0].node
+			collectExprColumns(filter, columns)
+			if filter != nil {
+				filters = append(filters, filter)
+			}
+		case planLimit:
+		default:
+			return scanRequest{}
+		}
+	}
+	if len(columns) == 0 {
+		return scanRequest{}
+	}
+	result := make([]string, 0, len(columns))
+	for column := range columns {
+		result = append(result, column)
+	}
+	sort.Strings(result)
+	return scanRequest{columns: result, filters: filters}
 }
 
 func collectExprColumns(node *exprNode, columns map[string]struct{}) {
@@ -88,52 +135,107 @@ func (s *tableSource) Err() error                     { return s.reader.Err() }
 func (s *tableSource) Release()                       { s.reader.Release() }
 
 func (lf *LazyFrame) execute(ctx context.Context) (arrow.Table, error) {
+	return lf.collectTable(ctx, nil)
+}
+
+func (lf *LazyFrame) collectWithScanRequest(ctx context.Context, request *scanRequest) (*DataFrame, error) {
+	table, err := lf.collectTable(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &DataFrame{table: table, engine: lf.engine}, nil
+}
+
+func (lf *LazyFrame) collectTable(ctx context.Context, request *scanRequest) (arrow.Table, error) {
+	var records []arrow.RecordBatch
+	var schema *arrow.Schema
+	err := lf.executeBatchesWithScanRequest(ctx, request, func(batch arrow.RecordBatch) error {
+		if schema == nil {
+			schema = batch.Schema()
+		}
+		batch.Retain()
+		records = append(records, batch)
+		return nil
+	})
+	if err != nil {
+		for _, record := range records {
+			record.Release()
+		}
+		return nil, err
+	}
+	if schema == nil {
+		for _, record := range records {
+			record.Release()
+		}
+		return nil, fmt.Errorf("golars: source produced no schema")
+	}
+	table, tableErr := safeTableFromRecords(schema, records)
+	for _, record := range records {
+		record.Release()
+	}
+	return table, tableErr
+}
+
+func (lf *LazyFrame) executeBatches(ctx context.Context, callback func(arrow.RecordBatch) error) error {
+	return lf.executeBatchesWithScanRequest(ctx, nil, callback)
+}
+
+func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request *scanRequest, callback func(arrow.RecordBatch) error) error {
 	nodes := make([]*planNode, 0, 8)
 	for node := lf.plan; node != nil; node = node.input {
 		nodes = append(nodes, node)
 	}
 	if len(nodes) == 0 {
-		return nil, ErrInvalidPlan
+		return ErrInvalidPlan
 	}
 	reversePlans(nodes)
 	root := nodes[0]
 	var source recordSource
 	var err error
-	ctx = withScanRequest(ctx, deriveScanRequest(nodes))
+	if request == nil {
+		derived := deriveScanRequest(nodes)
+		request = &derived
+	}
+	ctx = withScanRequest(ctx, *request)
 	switch root.kind {
 	case planTable:
 		source = newTableSource(root.table, lf.engine.batchSize)
 	case planSource:
 		source, err = root.source(ctx, lf.engine)
 	default:
-		return nil, fmt.Errorf("%w: plan has no source", ErrInvalidPlan)
+		return fmt.Errorf("%w: plan has no source", ErrInvalidPlan)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer source.Release()
 
 	sourceSchema := source.Schema()
-	var records []arrow.RecordBatch
+	emitted := false
 	remaining := int64(math.MaxInt64)
 	for source.Next() {
 		if err := ctx.Err(); err != nil {
-			for _, rec := range records {
-				rec.Release()
-			}
-			return nil, err
+			return err
 		}
 		batch := source.RecordBatch()
 		batch.Retain()
-		for _, node := range nodes[1:] {
+		for i := 1; i < len(nodes); i++ {
+			node := nodes[i]
+			if node.kind == planFilter && i+1 < len(nodes) && nodes[i+1].kind == planSelect && canFuseFilterSelect(nodes[i+1].exprs) {
+				next, fuseErr := applyFilterSelect(ctx, lf.engine, batch, node.exprs[0].node, nodes[i+1].exprs)
+				batch.Release()
+				if fuseErr != nil {
+					return fuseErr
+				}
+				batch = next
+				i++
+				continue
+			}
 			var next arrow.RecordBatch
 			next, remaining, err = applyPlanNode(ctx, lf.engine, node, batch, remaining)
 			batch.Release()
 			if err != nil {
-				for _, rec := range records {
-					rec.Release()
-				}
-				return nil, err
+				return err
 			}
 			if next == nil {
 				batch = nil
@@ -142,59 +244,55 @@ func (lf *LazyFrame) execute(ctx context.Context) (arrow.Table, error) {
 			batch = next
 		}
 		if batch != nil {
-			records = append(records, batch)
+			emitted = true
+			callbackErr := callback(batch)
+			batch.Release()
+			if callbackErr != nil {
+				return callbackErr
+			}
 		}
 		if remaining == 0 {
 			break
 		}
 	}
 	if err := source.Err(); err != nil {
-		for _, rec := range records {
-			rec.Release()
-		}
-		return nil, err
+		return err
 	}
-	var schema *arrow.Schema
-	if len(records) > 0 {
-		schema = records[0].Schema()
-	} else {
-		schema = sourceSchema
-		if schema == nil {
-			return nil, fmt.Errorf("golars: source produced no schema")
+	if emitted {
+		return nil
+	}
+	if sourceSchema == nil {
+		return fmt.Errorf("golars: source produced no schema")
+	}
+	// Run transformations over a zero-row batch so Select/WithColumns still
+	// produce their projected schema for empty results.
+	empty, emptyErr := emptyRecordBatch(sourceSchema, lf.engine.allocator)
+	if emptyErr != nil {
+		return emptyErr
+	}
+	for _, node := range nodes[1:] {
+		next, _, nodeErr := applyPlanNode(ctx, lf.engine, node, empty, math.MaxInt64)
+		currentSchema := empty.Schema()
+		empty.Release()
+		if nodeErr != nil {
+			return nodeErr
 		}
-		// Run transformations over a zero-row batch so Select/WithColumns still
-		// produce their projected schema for empty results.
-		empty, emptyErr := emptyRecordBatch(schema, lf.engine.allocator)
-		if emptyErr != nil {
-			return nil, emptyErr
-		}
-		for _, node := range nodes[1:] {
-			next, _, nodeErr := applyPlanNode(ctx, lf.engine, node, empty, math.MaxInt64)
-			currentSchema := empty.Schema()
-			empty.Release()
-			if nodeErr != nil {
-				return nil, nodeErr
+		if next == nil {
+			var nextErr error
+			empty, nextErr = emptyRecordBatch(currentSchema, lf.engine.allocator)
+			if nextErr != nil {
+				return nextErr
 			}
-			if next == nil {
-				var emptyErr error
-				empty, emptyErr = emptyRecordBatch(currentSchema, lf.engine.allocator)
-				if emptyErr != nil {
-					return nil, emptyErr
-				}
-				continue
-			}
-			empty = next
+			continue
 		}
-		if empty != nil {
-			schema = empty.Schema()
-			empty.Release()
-		}
+		empty = next
 	}
-	table, tableErr := safeTableFromRecords(schema, records)
-	for _, rec := range records {
-		rec.Release()
+	if empty == nil {
+		return nil
 	}
-	return table, tableErr
+	callbackErr := callback(empty)
+	empty.Release()
+	return callbackErr
 }
 
 func safeTableFromRecords(schema *arrow.Schema, records []arrow.RecordBatch) (table arrow.Table, err error) {
@@ -285,6 +383,42 @@ func applyPlanNode(ctx context.Context, engine *Engine, node *planNode, batch ar
 		batch.Retain()
 		return batch, remaining, nil
 	}
+}
+
+func canFuseFilterSelect(exprs []Expr) bool {
+	for _, expr := range exprs {
+		if expr.node != nil && expr.node.kind == exprCall && expr.node.name == "all_columns" {
+			return false
+		}
+	}
+	return true
+}
+
+func applyFilterSelect(ctx context.Context, engine *Engine, batch arrow.RecordBatch, filterNode *exprNode, exprs []Expr) (arrow.RecordBatch, error) {
+	filter, err := evalExpr(ctx, engine, filterNode, batch)
+	if err != nil {
+		return nil, err
+	}
+	defer filter.Release()
+	if filter.DataType().ID() != arrow.BOOL {
+		return nil, fmt.Errorf("%w: filter must be boolean, got %s", ErrTypeMismatch, filter.DataType())
+	}
+	columns := make([]arrow.Array, 0, len(exprs))
+	fields := make([]arrow.Field, 0, len(exprs))
+	for _, expr := range exprs {
+		column, evalErr := evalExpr(ctx, engine, expr.node, batch)
+		if evalErr != nil {
+			releaseArrays(columns)
+			return nil, evalErr
+		}
+		columns = append(columns, column)
+		fields = append(fields, arrow.Field{Name: expr.outputName(), Type: column.DataType(), Nullable: true})
+	}
+	selected := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, batch.NumRows())
+	releaseArrays(columns)
+	filtered, err := compute.FilterRecordBatch(compute.WithAllocator(ctx, engine.allocator), selected, filter, compute.DefaultFilterOptions())
+	selected.Release()
+	return filtered, err
 }
 
 func applySelect(ctx context.Context, engine *Engine, batch arrow.RecordBatch, exprs []Expr) (arrow.RecordBatch, int64, error) {

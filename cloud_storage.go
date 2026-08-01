@@ -44,6 +44,42 @@ func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	return object.Body, nil
 }
 
+func (s *S3Store) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
+	bucket, key, err := parseObjectURI(uri, "s3")
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	object, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if object.ContentLength == nil {
+		return ObjectInfo{}, fmt.Errorf("golars: S3 object %q has no content length", uri)
+	}
+	return ObjectInfo{Size: *object.ContentLength}, nil
+}
+
+func (s *S3Store) OpenRange(ctx context.Context, uri string, offset, length int64) (io.ReadCloser, error) {
+	if err := validateObjectRange(offset, length); err != nil {
+		return nil, err
+	}
+	bucket, key, err := parseObjectURI(uri, "s3")
+	if err != nil {
+		return nil, err
+	}
+	end := offset + length - 1
+	rangeValue := fmt.Sprintf("bytes=%d-%d", offset, end)
+	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeValue),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object.Body, nil
+}
+
 func (s *S3Store) Create(ctx context.Context, uri string) (io.WriteCloser, error) {
 	bucket, key, err := parseObjectURI(uri, "s3")
 	if err != nil {
@@ -137,6 +173,29 @@ func (s *GCSStore) Open(ctx context.Context, uri string) (io.ReadCloser, error) 
 	}
 	return s.client.Bucket(bucket).Object(key).NewReader(ctx)
 }
+
+func (s *GCSStore) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
+	bucket, key, err := parseObjectURI(uri, "gs")
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	attrs, err := s.client.Bucket(bucket).Object(key).Attrs(ctx)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Size: attrs.Size}, nil
+}
+
+func (s *GCSStore) OpenRange(ctx context.Context, uri string, offset, length int64) (io.ReadCloser, error) {
+	if err := validateObjectRange(offset, length); err != nil {
+		return nil, err
+	}
+	bucket, key, err := parseObjectURI(uri, "gs")
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Bucket(bucket).Object(key).NewRangeReader(ctx, offset, length)
+}
 func (s *GCSStore) Create(ctx context.Context, uri string) (io.WriteCloser, error) {
 	bucket, key, err := parseObjectURI(uri, "gs")
 	if err != nil {
@@ -193,4 +252,14 @@ func parseObjectURI(uri, scheme string) (string, string, error) {
 		return "", "", fmt.Errorf("golars: invalid %s URI %q", scheme, uri)
 	}
 	return value[:separator], value[separator+1:], nil
+}
+
+func validateObjectRange(offset, length int64) error {
+	if offset < 0 || length <= 0 {
+		return fmt.Errorf("golars: invalid object range offset=%d length=%d", offset, length)
+	}
+	if offset > int64(^uint64(0)>>1)-length {
+		return fmt.Errorf("golars: object range overflows int64: offset=%d length=%d", offset, length)
+	}
+	return nil
 }

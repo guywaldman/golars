@@ -32,6 +32,21 @@ type ObjectStore interface {
 	Glob(context.Context, string) ([]string, error)
 }
 
+// ObjectInfo contains the metadata needed for random-access scans.
+type ObjectInfo struct {
+	Size int64
+}
+
+// RangeObjectStore is an optional extension used by Parquet scans. Stores that
+// implement it allow the engine to read metadata and column chunks with HTTP
+// range requests instead of downloading the whole object. Existing ObjectStore
+// implementations remain valid and use the materializing fallback.
+type RangeObjectStore interface {
+	ObjectStore
+	Stat(context.Context, string) (ObjectInfo, error)
+	OpenRange(context.Context, string, int64, int64) (io.ReadCloser, error)
+}
+
 func WithObjectStore(scheme string, store ObjectStore) EngineOption {
 	return func(c *engineConfig) error {
 		scheme = strings.ToLower(strings.TrimSuffix(scheme, "://"))

@@ -34,6 +34,11 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 	if len(keys) == 0 || len(exprs) == 0 {
 		return nil, fmt.Errorf("%w: GroupBy.Agg needs keys and expressions", ErrInvalidPlan)
 	}
+	if spec, ok := makeFastGroupBySpec(keys, exprs); ok {
+		lf := df.Lazy()
+		defer lf.Close()
+		return executeFastGroupBy(ctx, lf, scanRequest{}, spec)
+	}
 	for _, expr := range exprs {
 		if node := unwrapAlias(expr.node); node == nil || node.kind != exprAggregate {
 			return nil, fmt.Errorf("%w: GroupBy.Agg expects aggregate expressions, got %s", ErrInvalidPlan, expr)

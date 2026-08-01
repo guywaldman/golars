@@ -1,0 +1,2 @@
+benchmarks/polars/target/
+benchmarks/*.parquet

@@ -1,0 +1,9 @@
+[package]
+name = "golars-polars-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+polars = { version = "0.52.0", default-features = false, features = ["lazy", "parquet"] }

@@ -402,6 +402,11 @@ func openSource(ctx context.Context, engine *Engine, path string, format formatK
 		if !ok {
 			return nil, fmt.Errorf("golars: no object store registered for %q", scheme)
 		}
+		if format == formatParquet {
+			if ranged, rangedOK := store.(RangeObjectStore); rangedOK {
+				return openRangedParquetSource(ctx, engine, ranged, path, config, request)
+			}
+		}
 		reader, err := store.Open(ctx, path)
 		if err != nil {
 			return nil, err
@@ -478,17 +483,7 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 			_ = parquetReader.Close()
 			return nil, err
 		}
-		columnIndices, err := parquetColumnIndices(arrowReader, request)
-		if err != nil {
-			_ = parquetReader.Close()
-			return nil, err
-		}
-		recordReader, err := arrowReader.GetRecordReader(ctx, columnIndices, nil)
-		if err != nil {
-			_ = parquetReader.Close()
-			return nil, err
-		}
-		return closeFile(recordReader), nil
+		return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request)
 	case formatCSV:
 		chunk := int(config.batchSize)
 		if chunk <= 0 {
@@ -549,19 +544,7 @@ func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, f
 				_ = file.Close()
 				return nil, err
 			}
-			columnIndices, err := parquetColumnIndices(arrowReader, request)
-			if err != nil {
-				_ = parquetReader.Close()
-				_ = file.Close()
-				return nil, err
-			}
-			recordReader, err := arrowReader.GetRecordReader(ctx, columnIndices, nil)
-			if err != nil {
-				_ = parquetReader.Close()
-				_ = file.Close()
-				return nil, err
-			}
-			return closeFile(recordReader), nil
+			return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request, file)
 		}
 		reader, err := ipc.NewFileReader(bytes.NewReader(data))
 		if err != nil {
@@ -629,6 +612,79 @@ func WriteParquet(ctx context.Context, df *DataFrame, destination string, option
 		return pqarrow.WriteTable(table, file, config.batchSize, props, pqarrow.NewArrowWriterProperties())
 	})
 }
+
+func writeParquetBatches(ctx context.Context, lf *LazyFrame, destination string, options ...WriteOption) error {
+	if lf == nil {
+		return ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := lf.engine.checkOpen(); err != nil {
+		return err
+	}
+	config := defaultWriteConfig(lf.engine)
+	for _, option := range options {
+		option(&config)
+	}
+	if !config.overwrite && uriScheme(destination) == "" {
+		if _, err := os.Stat(destination); err == nil {
+			return fmt.Errorf("golars: destination exists: %q (use WithOverwrite(true))", destination)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var file io.WriteCloser
+	var writer *pqarrow.FileWriter
+	open := func(schema *arrow.Schema) error {
+		var err error
+		if scheme := uriScheme(destination); scheme != "" {
+			store, ok := lf.engine.ObjectStore(scheme)
+			if !ok {
+				return fmt.Errorf("golars: no object store registered for %q", scheme)
+			}
+			file, err = store.Create(ctx, destination)
+		} else {
+			file, err = os.Create(destination)
+		}
+		if err != nil {
+			return err
+		}
+		writer, err = pqarrow.NewFileWriter(schema, file, parquet.NewWriterProperties(), pqarrow.NewArrowWriterProperties())
+		if err != nil {
+			_ = file.Close()
+			file = nil
+			return err
+		}
+		return nil
+	}
+	closeOutput := func() error {
+		if writer != nil {
+			return writer.Close()
+		}
+		if file != nil {
+			return file.Close()
+		}
+		return nil
+	}
+	streamErr := lf.ForEachBatch(ctx, func(batch arrow.RecordBatch) error {
+		if writer == nil {
+			if err := open(batch.Schema()); err != nil {
+				return err
+			}
+		}
+		return writer.Write(batch)
+	})
+	closeErr := closeOutput()
+	if streamErr != nil {
+		return streamErr
+	}
+	return closeErr
+}
+
 func WriteCSV(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {
 		writer := csv.NewWriter(file, table.Schema(), csv.WithHeader(config.hasHeader), csv.WithComma(config.delimiter))
