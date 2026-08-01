@@ -57,6 +57,9 @@ go test -tags=e2e ./... -count=1 -v
 
 The E2E tests skip when Docker is unavailable. Remote Parquet/IPC objects that
 do not expose the optional range interface are materialized before decoding.
+For a Docker-compatible runtime using a non-default socket, set `DOCKER_HOST`
+explicitly; for example, OrbStack on macOS uses
+`DOCKER_HOST=unix://${HOME}/.orbstack/run/docker.sock`.
 
 ## Streaming and predicate pruning
 
