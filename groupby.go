@@ -39,6 +39,11 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 		defer lf.Close()
 		return executeFastGroupBy(ctx, lf, scanRequest{}, spec)
 	}
+	if spec, ok := makeSimpleGroupBySpec(keys, exprs); ok {
+		lf := df.Lazy()
+		defer lf.Close()
+		return executeSimpleGroupBy(ctx, lf, scanRequest{}, spec)
+	}
 	for _, expr := range exprs {
 		if node := unwrapAlias(expr.node); node == nil || node.kind != exprAggregate {
 			return nil, fmt.Errorf("%w: GroupBy.Agg expects aggregate expressions, got %s", ErrInvalidPlan, expr)
@@ -241,10 +246,14 @@ func unwrapAlias(node *exprNode) *exprNode {
 }
 
 func aggOutputType(name string, input arrow.DataType) arrow.DataType {
-	if name == "mean" {
+	switch name {
+	case "mean":
 		return arrow.PrimitiveTypes.Float64
+	case "count", "count_rows":
+		return arrow.PrimitiveTypes.Int64
+	default:
+		return input
 	}
-	return input
 }
 
 func appendScalar(builder array.Builder, value scalar.Scalar) {

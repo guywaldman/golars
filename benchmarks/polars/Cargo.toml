@@ -6,4 +6,4 @@ publish = false
 
 [dependencies]
 libc = "0.2"
-polars = { version = "0.52.0", default-features = false, features = ["lazy", "parquet"] }
+polars = { version = "0.52.0", default-features = false, features = ["lazy", "parquet", "strings", "regex", "temporal", "timezones"] }

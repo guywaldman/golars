@@ -13,12 +13,32 @@ import (
 var benchmarkDataset = flag.String("bench-dataset", "", "Parquet input for the cross-language benchmarks")
 var benchmarkCutoff = flag.Int64("bench-cutoff", DefaultCutoff, "inclusive id filter cutoff")
 
+func BenchmarkProjectionOnly(b *testing.B) {
+	benchmarkQuery(b, ProjectionOnly)
+}
+
 func BenchmarkFilterSelect(b *testing.B) {
 	benchmarkQuery(b, FilterSelect)
 }
 
+func BenchmarkCompoundFilter(b *testing.B) {
+	benchmarkQuery(b, CompoundFilter)
+}
+
+func BenchmarkDerivedProjection(b *testing.B) {
+	benchmarkQuery(b, DerivedProjection)
+}
+
 func BenchmarkGroupedAggregation(b *testing.B) {
 	benchmarkQuery(b, GroupedAggregation)
+}
+
+func BenchmarkMultiAggregation(b *testing.B) {
+	benchmarkQuery(b, MultiAggregation)
+}
+
+func BenchmarkStringFilter(b *testing.B) {
+	benchmarkQuery(b, StringFilter)
 }
 
 func benchmarkQuery(b *testing.B, query Query) {

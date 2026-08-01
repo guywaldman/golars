@@ -145,6 +145,9 @@ func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 		if spec, ok := makeFastGroupBySpec(lf.plan.keys, lf.plan.exprs); ok {
 			return executeFastGroupBy(ctx, base, request, spec)
 		}
+		if spec, ok := makeSimpleGroupBySpec(lf.plan.keys, lf.plan.exprs); ok {
+			return executeSimpleGroupBy(ctx, base, request, spec)
+		}
 		input, collectErr := base.collectWithScanRequest(ctx, &request)
 		if collectErr != nil {
 			return nil, collectErr

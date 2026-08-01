@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -840,6 +841,11 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 		if len(args) != 2 || args[0].Len() != args[1].Len() {
 			return nil, fmt.Errorf("%w: string predicate inputs must have equal lengths", ErrTypeMismatch)
 		}
+		if left, leftOK := args[0].(array.StringLike); leftOK {
+			if right, rightOK := args[1].(array.StringLike); rightOK {
+				return evalStringPredicateFast(name, left, right, mem)
+			}
+		}
 		builder := array.NewBooleanBuilder(mem)
 		defer builder.Release()
 		for i := 0; i < args[0].Len(); i++ {
@@ -864,6 +870,18 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 		return builder.NewBooleanArray(), nil
 	}
 	if name == "str_length" {
+		if values, ok := args[0].(array.StringLike); ok {
+			builder := array.NewInt64Builder(mem)
+			defer builder.Release()
+			for i := 0; i < values.Len(); i++ {
+				if !values.IsValid(i) {
+					builder.AppendNull()
+					continue
+				}
+				builder.Append(int64(utf8.RuneCountInString(values.Value(i))))
+			}
+			return builder.NewInt64Array(), nil
+		}
 		builder := array.NewInt64Builder(mem)
 		defer builder.Release()
 		for i := 0; i < args[0].Len(); i++ {
@@ -895,6 +913,31 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 		builder.Append(text)
 	}
 	return builder.NewStringArray(), nil
+}
+
+func evalStringPredicateFast(name string, left, right array.StringLike, mem *quotaAllocator) (arrow.Array, error) {
+	builder := array.NewBooleanBuilder(mem)
+	defer builder.Release()
+	for i := 0; i < left.Len(); i++ {
+		if !left.IsValid(i) || !right.IsValid(i) {
+			builder.AppendNull()
+			continue
+		}
+		leftText, rightText := left.Value(i), right.Value(i)
+		var matched bool
+		switch name {
+		case "str_contains":
+			matched = strings.Contains(leftText, rightText)
+		case "str_starts_with":
+			matched = strings.HasPrefix(leftText, rightText)
+		case "str_ends_with":
+			matched = strings.HasSuffix(leftText, rightText)
+		default:
+			return nil, fmt.Errorf("%w: unsupported string predicate %s", ErrInvalidPlan, name)
+		}
+		builder.Append(matched)
+	}
+	return builder.NewBooleanArray(), nil
 }
 
 func evalTemporalCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow.Array, error) {

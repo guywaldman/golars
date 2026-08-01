@@ -1,27 +1,43 @@
 use std::env;
+use std::ops::Mul;
 use std::time::Instant;
 
 use polars::prelude::*;
 
 #[derive(Clone, Copy)]
 enum Query {
+    ProjectionOnly,
     FilterSelect,
+    CompoundFilter,
+    DerivedProjection,
     GroupedAggregation,
+    MultiAggregation,
+    StringFilter,
 }
 
 impl Query {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "projection_only" => Ok(Self::ProjectionOnly),
             "filter_select" => Ok(Self::FilterSelect),
+            "compound_filter" => Ok(Self::CompoundFilter),
+            "derived_projection" => Ok(Self::DerivedProjection),
             "grouped_aggregation" => Ok(Self::GroupedAggregation),
+            "multi_aggregation" => Ok(Self::MultiAggregation),
+            "string_filter" => Ok(Self::StringFilter),
             _ => Err(format!("unknown query {value:?}")),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
+            Self::ProjectionOnly => "projection_only",
             Self::FilterSelect => "filter_select",
+            Self::CompoundFilter => "compound_filter",
+            Self::DerivedProjection => "derived_projection",
             Self::GroupedAggregation => "grouped_aggregation",
+            Self::MultiAggregation => "multi_aggregation",
+            Self::StringFilter => "string_filter",
         }
     }
 }
@@ -30,11 +46,43 @@ fn execute(path: &str, query: Query, cutoff: i64) -> PolarsResult<DataFrame> {
     let scan = LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
         .filter(col("id").gt_eq(lit(cutoff)));
     match query {
+        Query::ProjectionOnly => {
+            LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
+                .select([col("group_id"), col("value"), col("payload")])
+                .collect()
+        }
         Query::FilterSelect => scan.select([col("group_id"), col("value")]).collect(),
+        Query::CompoundFilter => scan
+            .filter(col("tenant").eq(lit("tenant-07")))
+            .select([col("tenant"), col("group_id"), col("value")])
+            .collect(),
+        Query::DerivedProjection => scan
+            .with_columns([
+                col("value")
+                    .mul(col("quantity").cast(DataType::Float64))
+                    .alias("revenue"),
+                col("payload").str().len_chars().alias("payload_len"),
+            ])
+            .select([col("tenant"), col("revenue"), col("payload_len")])
+            .collect(),
         Query::GroupedAggregation => scan
             .group_by([col("group_id")])
             .agg([col("value").sum().alias("total")])
             .collect(),
+        Query::MultiAggregation => scan
+            .group_by([col("tenant")])
+            .agg([
+                col("value").sum().alias("value_sum"),
+                col("value").mean().alias("value_mean"),
+                col("value").count().alias("value_count"),
+            ])
+            .collect(),
+        Query::StringFilter => {
+            LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
+                .filter(col("payload").str().starts_with(lit("payload-00")))
+                .select([col("tenant"), col("payload"), col("value")])
+                .collect()
+        }
     }
 }
 
