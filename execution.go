@@ -19,10 +19,11 @@ type tableSource struct {
 }
 
 type scanRequest struct {
-	columns           []string
-	projectionColumns []string
-	filterOnlyColumns []string
-	filters           []*exprNode
+	columns               []string
+	projectionColumns     []string
+	filterOnlyColumns     []string
+	projectionOnlyBatches bool
+	filters               []*exprNode
 }
 
 type scanRequestContextKey struct{}
@@ -75,10 +76,11 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 	}
 	sort.Strings(result)
 	return scanRequest{
-		columns:           result,
-		projectionColumns: sortedColumnNames(projectionColumns),
-		filterOnlyColumns: filterOnlyColumnNames(filterColumns, projectionColumns),
-		filters:           requestFilters,
+		columns:               result,
+		projectionColumns:     sortedColumnNames(projectionColumns),
+		filterOnlyColumns:     filterOnlyColumnNames(filterColumns, projectionColumns),
+		projectionOnlyBatches: true,
+		filters:               requestFilters,
 	}
 }
 

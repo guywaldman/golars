@@ -80,7 +80,7 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 			return nil, projectionErr
 		}
 		requestedSchema := parquetRequestedSchema(schema, columnIndices)
-		projected := newParquetProjectionSource(ctx, engine, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches)
+		projected := newParquetProjectionSource(ctx, engine, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches, request.projectionOnlyBatches)
 		return &fileSource{reader: projected, closers: fileClosers}, nil
 	}
 	recordReader, err := arrowReader.GetRecordReader(ctx, columnIndices, rowGroups)

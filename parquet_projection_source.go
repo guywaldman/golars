@@ -10,10 +10,9 @@ import (
 
 // parquetProjectionSource reads only projected columns from row groups whose
 // filters are proven true. Partial groups still read every column needed by
-// the filter and go through the normal exact filter evaluation. Filter-only
-// columns in proven groups are represented by null arrays because execution
-// skips those filter nodes for that batch and the scan request guarantees that
-// downstream expressions do not reference them.
+// the filter and go through the normal exact filter evaluation. A terminal
+// select can consume mixed-width source batches because it normalizes every
+// batch to its projected output; blocking consumers keep the stable schema.
 type parquetProjectionSource struct {
 	ctx              context.Context
 	engine           *Engine
@@ -21,6 +20,7 @@ type parquetProjectionSource struct {
 	outputSchema     *arrow.Schema
 	allColumns       []int
 	projectedColumns []int
+	projectionOnly   bool
 	runs             []parquetProjectionRun
 	runIndex         int
 	currentReader    pqarrow.RecordReader
@@ -42,6 +42,7 @@ func newParquetProjectionSource(
 	outputSchema *arrow.Schema,
 	allColumns, projectedColumns, rowGroups []int,
 	fullMatches []bool,
+	projectionOnly bool,
 ) *parquetProjectionSource {
 	runs := make([]parquetProjectionRun, 0, len(rowGroups))
 	for i, rowGroup := range rowGroups {
@@ -59,6 +60,7 @@ func newParquetProjectionSource(
 		outputSchema:     outputSchema,
 		allColumns:       append([]int(nil), allColumns...),
 		projectedColumns: append([]int(nil), projectedColumns...),
+		projectionOnly:   projectionOnly,
 		runs:             runs,
 	}
 }
@@ -71,7 +73,7 @@ func (s *parquetProjectionSource) Next() bool {
 		if s.currentReader != nil {
 			if s.currentReader.Next() {
 				batch := s.currentReader.RecordBatch()
-				if s.currentFull {
+				if s.currentFull && !s.projectionOnly {
 					projected, err := s.addMissingColumns(batch)
 					if err != nil {
 						s.err = err

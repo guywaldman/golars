@@ -257,6 +257,59 @@ func TestParquetUnsupportedFilterFallsBackToExactEvaluation(t *testing.T) {
 	}
 }
 
+func TestParquetProjectionKeepsGroupedSchemaStable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "grouped.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	id, err := NewSeries("id", []int64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer id.Close()
+	group, err := NewSeries("group", []int64{1, 1, 2, 2, 3, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer group.Close()
+	value, err := NewSeries("value", []int64{10, 20, 30, 40, 50, 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer value.Close()
+	df, err := newDataFrame(engine, id, group, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ScanParquet(path).
+		Filter(Col("id").Gt(Lit(int64(3)))).
+		GroupBy(Col("group")).
+		Agg(Col("value").Sum().Alias("total")).
+		Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if result.Height() != 2 || result.Width() != 2 {
+		t.Fatalf("unexpected grouped shape=(%d,%d)", result.Height(), result.Width())
+	}
+	groups := numericColumnValues(t, result, "group").([]int64)
+	totals := numericColumnValues(t, result, "total").([]int64)
+	if len(groups) != 2 || groups[0] != 2 || groups[1] != 3 {
+		t.Fatalf("groups=%v, want [2 3]", groups)
+	}
+	if len(totals) != 2 || totals[0] != 40 || totals[1] != 110 {
+		t.Fatalf("totals=%v, want [40 110]", totals)
+	}
+}
+
 func allInt64ColumnValues(t *testing.T, df *DataFrame, name string) []int64 {
 	t.Helper()
 	series, err := df.Column(name)
