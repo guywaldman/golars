@@ -9,9 +9,11 @@ import (
 
 	"cloud.google.com/go/storage"
 	aws "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/middleware"
 	dockerclient "github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -30,6 +32,7 @@ func TestE2ES3LocalStack(t *testing.T) {
 	config, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion("us-east-1"),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "test")),
+		awsconfig.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +40,12 @@ func TestE2ES3LocalStack(t *testing.T) {
 	client := s3.NewFromConfig(config, func(options *s3.Options) {
 		options.BaseEndpoint = aws.String(endpoint)
 		options.UsePathStyle = true
+		options.APIOptions = append(options.APIOptions, func(stack *middleware.Stack) error {
+			if err := v4.RemoveComputePayloadSHA256Middleware(stack); err != nil {
+				return err
+			}
+			return v4.AddUnsignedPayloadMiddleware(stack)
+		})
 	})
 	bucket := "golars-e2e-s3"
 	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
@@ -164,7 +173,7 @@ func runEmulator(t *testing.T, ctx context.Context, image, port string, strategy
 	if err != nil {
 		t.Fatalf("start emulator %s: %v", image, err)
 	}
-	endpoint, err := container.Endpoint(ctx, "http")
+	endpoint, err := container.PortEndpoint(ctx, port, "http")
 	if err != nil {
 		_ = testcontainers.TerminateContainer(container)
 		t.Fatal(err)

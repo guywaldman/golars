@@ -492,7 +492,7 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 			_ = parquetReader.Close()
 			return nil, err
 		}
-		return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request)
+		return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request, true)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -576,7 +576,7 @@ func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, f
 				_ = file.Close()
 				return nil, err
 			}
-			return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request, file)
+			return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request, false, file)
 		}
 		reader, err := ipc.NewFileReader(bytes.NewReader(data))
 		if err != nil {
@@ -615,16 +615,20 @@ func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, f
 }
 
 func parquetColumnIndices(reader *pqarrow.FileReader, request scanRequest) ([]int, error) {
-	if len(request.columns) == 0 {
+	return parquetColumnIndicesForNames(reader, request.columns)
+}
+
+func parquetColumnIndicesForNames(reader *pqarrow.FileReader, names []string) ([]int, error) {
+	if len(names) == 0 {
 		return nil, nil
 	}
 	schema, err := reader.Schema()
 	if err != nil {
 		return nil, err
 	}
-	indices := make([]int, 0, len(request.columns))
-	seen := make(map[int]struct{}, len(request.columns))
-	for _, name := range request.columns {
+	indices := make([]int, 0, len(names))
+	seen := make(map[int]struct{}, len(names))
+	for _, name := range names {
 		fields := schema.FieldIndices(name)
 		if len(fields) == 0 {
 			return nil, &ColumnNotFoundError{Name: name, Available: schemaNames(schema)}
@@ -636,6 +640,15 @@ func parquetColumnIndices(reader *pqarrow.FileReader, request scanRequest) ([]in
 	}
 	sort.Ints(indices)
 	return indices, nil
+}
+
+func parquetRequestedSchema(schema *arrow.Schema, indices []int) *arrow.Schema {
+	fields := make([]arrow.Field, len(indices))
+	for i, index := range indices {
+		fields[i] = schema.Field(index)
+	}
+	metadata := schema.Metadata()
+	return arrow.NewSchema(fields, &metadata)
 }
 
 func WriteParquet(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {

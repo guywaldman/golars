@@ -145,6 +145,143 @@ func TestParquetFilterGuaranteesPreservePartialGroups(t *testing.T) {
 	}
 }
 
+func TestParquetProjectionPreservesFullAndPartialGroups(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "projected.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	id, err := NewSeries("id", []int64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer id.Close()
+	value, err := NewSeries("value", []int64{10, 20, 30, 40, 50, 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer value.Close()
+	df, err := newDataFrame(engine, id, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		predicate Expr
+		expected  []int64
+	}{
+		{
+			name:      "full groups",
+			predicate: Col("id").Gt(Lit(int64(2))),
+			expected:  []int64{30, 40, 50, 60},
+		},
+		{
+			name:      "partial and full groups",
+			predicate: Col("id").Gt(Lit(int64(3))),
+			expected:  []int64{40, 50, 60},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := engine.ScanParquet(path).
+				Filter(test.predicate).
+				Select(Col("value")).
+				Collect(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer result.Close()
+			if got := allInt64ColumnValues(t, result, "value"); len(got) != len(test.expected) {
+				t.Fatalf("values=%v, want %v", got, test.expected)
+			} else {
+				for i := range got {
+					if got[i] != test.expected[i] {
+						t.Fatalf("values=%v, want %v", got, test.expected)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestParquetUnsupportedFilterFallsBackToExactEvaluation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "unsupported-filter.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	id, err := NewSeries("id", []int64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer id.Close()
+	value, err := NewSeries("value", []int64{10, 20, 30, 40, 50, 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer value.Close()
+	df, err := newDataFrame(engine, id, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ScanParquet(path).
+		Filter(Col("id").Add(Lit(int64(1))).Gt(Lit(int64(3)))).
+		Select(Col("value")).
+		Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	got := allInt64ColumnValues(t, result, "value")
+	expected := []int64{30, 40, 50, 60}
+	if len(got) != len(expected) {
+		t.Fatalf("values=%v, want %v", got, expected)
+	}
+	for i := range got {
+		if got[i] != expected[i] {
+			t.Fatalf("values=%v, want %v", got, expected)
+		}
+	}
+}
+
+func allInt64ColumnValues(t *testing.T, df *DataFrame, name string) []int64 {
+	t.Helper()
+	series, err := df.Column(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer series.Close()
+	chunked := series.ArrowChunked()
+	defer chunked.Release()
+	var values []int64
+	for _, chunk := range chunked.Chunks() {
+		arrayValues, ok := chunk.(*array.Int64)
+		if !ok {
+			t.Fatalf("column %q has type %T, want *array.Int64", name, chunk)
+		}
+		for index := 0; index < arrayValues.Len(); index++ {
+			if !arrayValues.IsValid(index) {
+				t.Fatalf("column %q has null at row %d", name, len(values))
+			}
+			values = append(values, arrayValues.Value(index))
+		}
+	}
+	return values
+}
+
 func TestParquetFilterGuaranteesKeepNullSemantics(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "nullable.parquet")

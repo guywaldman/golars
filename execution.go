@@ -19,8 +19,10 @@ type tableSource struct {
 }
 
 type scanRequest struct {
-	columns []string
-	filters []*exprNode
+	columns           []string
+	projectionColumns []string
+	filterOnlyColumns []string
+	filters           []*exprNode
 }
 
 type scanRequestContextKey struct{}
@@ -39,12 +41,15 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		return scanRequest{}
 	}
 	columns := make(map[string]struct{})
+	projectionColumns := make(map[string]struct{})
+	filterColumns := make(map[string]struct{})
 	var requestFilters []*exprNode
 	for _, node := range nodes[1 : len(nodes)-1] {
 		switch node.kind {
 		case planFilter:
 			filter := node.exprs[0].node
 			collectExprColumns(filter, columns)
+			collectExprColumns(filter, filterColumns)
 			if filter != nil {
 				requestFilters = append(requestFilters, filter)
 			}
@@ -59,6 +64,7 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 			return scanRequest{}
 		}
 		collectExprColumns(expr.node, columns)
+		collectExprColumns(expr.node, projectionColumns)
 	}
 	if len(columns) == 0 {
 		return scanRequest{}
@@ -68,7 +74,12 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		result = append(result, column)
 	}
 	sort.Strings(result)
-	return scanRequest{columns: result, filters: requestFilters}
+	return scanRequest{
+		columns:           result,
+		projectionColumns: sortedColumnNames(projectionColumns),
+		filterOnlyColumns: filterOnlyColumnNames(filterColumns, projectionColumns),
+		filters:           requestFilters,
+	}
 }
 
 func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
@@ -81,11 +92,15 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 	}
 	reversePlans(nodes)
 	columns := make(map[string]struct{})
+	projectionColumns := make(map[string]struct{})
+	filterColumns := make(map[string]struct{})
 	for _, expr := range keys {
 		collectExprColumns(expr.node, columns)
+		collectExprColumns(expr.node, projectionColumns)
 	}
 	for _, expr := range exprs {
 		collectExprColumns(expr.node, columns)
+		collectExprColumns(expr.node, projectionColumns)
 	}
 	var filters []*exprNode
 	for _, node := range nodes[1:] {
@@ -93,6 +108,7 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 		case planFilter:
 			filter := node.exprs[0].node
 			collectExprColumns(filter, columns)
+			collectExprColumns(filter, filterColumns)
 			if filter != nil {
 				filters = append(filters, filter)
 			}
@@ -109,7 +125,32 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 		result = append(result, column)
 	}
 	sort.Strings(result)
-	return scanRequest{columns: result, filters: filters}
+	return scanRequest{
+		columns:           result,
+		projectionColumns: sortedColumnNames(projectionColumns),
+		filterOnlyColumns: filterOnlyColumnNames(filterColumns, projectionColumns),
+		filters:           filters,
+	}
+}
+
+func sortedColumnNames(columns map[string]struct{}) []string {
+	result := make([]string, 0, len(columns))
+	for column := range columns {
+		result = append(result, column)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func filterOnlyColumnNames(filters, projection map[string]struct{}) []string {
+	result := make([]string, 0, len(filters))
+	for column := range filters {
+		if _, used := projection[column]; !used {
+			result = append(result, column)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func collectExprColumns(node *exprNode, columns map[string]struct{}) {

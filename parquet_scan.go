@@ -42,10 +42,10 @@ func openRangedParquetSource(ctx context.Context, engine *Engine, store RangeObj
 		_ = reader.Close()
 		return nil, err
 	}
-	return newParquetRecordSource(ctx, engine, reader, arrowReader, request)
+	return newParquetRecordSource(ctx, engine, reader, arrowReader, request, false)
 }
 
-func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquetfile.Reader, arrowReader *pqarrow.FileReader, request scanRequest, closers ...io.Closer) (recordSource, error) {
+func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquetfile.Reader, arrowReader *pqarrow.FileReader, request scanRequest, local bool, closers ...io.Closer) (recordSource, error) {
 	closeAll := func() {
 		_ = reader.Close()
 		for _, closer := range closers {
@@ -62,7 +62,7 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 		closeAll()
 		return nil, err
 	}
-	rowGroups, fullMatches, err := parquetRowGroupSelectionWithGuarantees(reader, schema, request.filters)
+	rowGroups, fullMatches, selectionApplicable, err := parquetRowGroupSelectionWithGuarantees(reader, schema, request.filters)
 	if err != nil {
 		closeAll()
 		return nil, err
@@ -70,8 +70,18 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 	fileClosers := make([]io.Closer, 0, len(closers)+1)
 	fileClosers = append(fileClosers, reader)
 	fileClosers = append(fileClosers, closers...)
-	if len(request.filters) > 0 && len(rowGroups) == 0 {
+	if len(request.filters) > 0 && selectionApplicable && len(rowGroups) == 0 {
 		return &fileSource{reader: &emptyRecordSource{schema: schema}, closers: fileClosers}, nil
+	}
+	if local && selectionApplicable && len(request.filterOnlyColumns) > 0 && len(request.projectionColumns) > 0 && hasFullMatch(fullMatches) {
+		projectionIndices, projectionErr := parquetColumnIndicesForNames(arrowReader, request.projectionColumns)
+		if projectionErr != nil {
+			closeAll()
+			return nil, projectionErr
+		}
+		requestedSchema := parquetRequestedSchema(schema, columnIndices)
+		projected := newParquetProjectionSource(ctx, engine, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches)
+		return &fileSource{reader: projected, closers: fileClosers}, nil
 	}
 	recordReader, err := arrowReader.GetRecordReader(ctx, columnIndices, rowGroups)
 	if err != nil {
@@ -83,7 +93,7 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 	for _, full := range fullMatches {
 		filtersFullyMatch = filtersFullyMatch && full
 	}
-	if len(request.filters) > 0 {
+	if len(request.filters) > 0 && selectionApplicable {
 		source = newParquetFilterSource(recordReader, reader, rowGroups, fullMatches)
 	}
 	return &fileSource{reader: source, closers: fileClosers, filtersFullyMatch: filtersFullyMatch}, nil
@@ -161,7 +171,7 @@ func parquetRowGroupIndices(reader *parquetfile.Reader, schema *arrow.Schema, fi
 }
 
 func parquetRowGroupSelection(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, bool, error) {
-	indices, fullMatches, err := parquetRowGroupSelectionWithGuarantees(reader, schema, filters)
+	indices, fullMatches, _, err := parquetRowGroupSelectionWithGuarantees(reader, schema, filters)
 	if err != nil {
 		return nil, false, err
 	}
@@ -172,9 +182,9 @@ func parquetRowGroupSelection(reader *parquetfile.Reader, schema *arrow.Schema, 
 	return indices, allMatch, nil
 }
 
-func parquetRowGroupSelectionWithGuarantees(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, []bool, error) {
+func parquetRowGroupSelectionWithGuarantees(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, []bool, bool, error) {
 	if len(filters) == 0 || schema == nil {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	parsed := make([][]parquetFilter, 0, len(filters))
 	for _, filter := range filters {
@@ -184,7 +194,7 @@ func parquetRowGroupSelectionWithGuarantees(reader *parquetfile.Reader, schema *
 		}
 	}
 	if len(parsed) == 0 || len(parsed) != len(filters) {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	indices := make([]int, 0, reader.NumRowGroups())
 	fullMatches := make([]bool, 0, reader.NumRowGroups())
@@ -210,7 +220,16 @@ func parquetRowGroupSelectionWithGuarantees(reader *parquetfile.Reader, schema *
 			fullMatches = append(fullMatches, fullyMatches)
 		}
 	}
-	return indices, fullMatches, nil
+	return indices, fullMatches, true, nil
+}
+
+func hasFullMatch(fullMatches []bool) bool {
+	for _, full := range fullMatches {
+		if full {
+			return true
+		}
+	}
+	return false
 }
 
 func parquetRowGroupFullyMatches(rowGroup *parquetfile.RowGroupReader, schema *arrow.Schema, predicate parquetFilter) bool {
