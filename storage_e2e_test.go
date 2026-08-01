@@ -4,6 +4,8 @@ package golars
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -146,6 +148,7 @@ func e2eFrame(t *testing.T, engine *Engine) *DataFrame {
 }
 
 func dockerAvailable(ctx context.Context) bool {
+	configureDockerHost()
 	provider, err := testcontainers.NewDockerProvider()
 	if err != nil {
 		return false
@@ -156,6 +159,20 @@ func dockerAvailable(ctx context.Context) bool {
 	}
 	_, err = provider.DaemonHost(ctx)
 	return err == nil
+}
+
+func configureDockerHost() {
+	if os.Getenv("DOCKER_HOST") != "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	socket := filepath.Join(home, ".orbstack", "run", "docker.sock")
+	if _, err := os.Stat(socket); err == nil {
+		_ = os.Setenv("DOCKER_HOST", "unix://"+socket)
+	}
 }
 
 func runEmulator(t *testing.T, ctx context.Context, image, port string, strategy wait.Strategy, env map[string]string, command ...string) (testcontainers.Container, string) {
