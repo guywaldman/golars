@@ -340,14 +340,21 @@ func expandPathsForEngine(ctx context.Context, engine *Engine, path string) ([]s
 }
 
 type fileSource struct {
-	reader  recordSource
-	closers []io.Closer
+	reader            recordSource
+	closers           []io.Closer
+	filtersFullyMatch bool
 }
 
 func (s *fileSource) Schema() *arrow.Schema          { return s.reader.Schema() }
 func (s *fileSource) Next() bool                     { return s.reader.Next() }
 func (s *fileSource) RecordBatch() arrow.RecordBatch { return s.reader.RecordBatch() }
 func (s *fileSource) Err() error                     { return s.reader.Err() }
+func (s *fileSource) FiltersFullyMatch() bool {
+	if source, ok := s.reader.(filterGuaranteeSource); ok {
+		return source.FiltersFullyMatch()
+	}
+	return s.filtersFullyMatch
+}
 func (s *fileSource) Release() {
 	if s.reader != nil {
 		s.reader.Release()
@@ -450,6 +457,12 @@ func (s *multiSource) Next() bool {
 }
 func (s *multiSource) RecordBatch() arrow.RecordBatch { return s.current.RecordBatch() }
 func (s *multiSource) Err() error                     { return s.err }
+func (s *multiSource) FiltersFullyMatch() bool {
+	if source, ok := s.current.(filterGuaranteeSource); ok {
+		return source.FiltersFullyMatch()
+	}
+	return false
+}
 func (s *multiSource) Release() {
 	if s.current != nil {
 		s.current.Release()
@@ -465,16 +478,12 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 	if strings.Contains(path, "://") {
 		return nil, fmt.Errorf("golars: remote storage %q requires an Engine object store; local source cannot open it", path)
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	closeFile := func(reader recordSource) recordSource { return &fileSource{reader: reader, closers: []io.Closer{file}} }
-	switch format {
-	case formatParquet:
-		parquetReader, err := parquetfile.NewParquetReader(file)
+	if format == formatParquet {
+		// Local Parquet scans use Arrow's memory-mapped reader when available.
+		// This removes a syscall and copy from each page read while retaining a
+		// regular file fallback for platforms without mmap support.
+		parquetReader, err := openLocalParquetFile(path)
 		if err != nil {
-			_ = file.Close()
 			return nil, err
 		}
 		props := pqarrow.ArrowReadProperties{BatchSize: config.batchSize, Parallel: engine.parallelism > 1}
@@ -484,6 +493,13 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 			return nil, err
 		}
 		return newParquetRecordSource(ctx, engine, parquetReader, arrowReader, request)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	closeFile := func(reader recordSource) recordSource { return &fileSource{reader: reader, closers: []io.Closer{file}} }
+	switch format {
 	case formatCSV:
 		chunk := int(config.batchSize)
 		if chunk <= 0 {
@@ -520,6 +536,22 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 		_ = file.Close()
 		return nil, fmt.Errorf("golars: unsupported format")
 	}
+}
+
+func openLocalParquetFile(path string) (*parquetfile.Reader, error) {
+	if reader, err := parquetfile.OpenParquetFile(path, true); err == nil {
+		return reader, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := parquetfile.NewParquetReader(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return reader, nil
 }
 
 func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, format formatKind, config scanConfig, request scanRequest) (recordSource, error) {

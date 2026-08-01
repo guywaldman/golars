@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	parquetfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -88,6 +89,98 @@ func TestRowGroupPruningAndRangeReads(t *testing.T) {
 	}
 	if store.fullOpens != 0 || len(store.ranges) == 0 {
 		t.Fatalf("expected range reads only, full opens=%d ranges=%d", store.fullOpens, len(store.ranges))
+	}
+}
+
+func TestParquetFilterGuaranteesPreservePartialGroups(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "data.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	values, err := NewSeries("value", []int64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer values.Close()
+	df, err := newDataFrame(engine, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ScanParquet(path).
+		Filter(Col("value").Gt(Lit(int64(3)))).
+		Select(Col("value")).
+		Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if result.Height() != 3 {
+		t.Fatalf("expected three matching rows, got %d", result.Height())
+	}
+	table, err := result.ArrowTable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer table.Release()
+	row := 0
+	for _, chunk := range table.Column(0).Data().Chunks() {
+		valuesArray := chunk.(*array.Int64)
+		for index := 0; index < valuesArray.Len(); index++ {
+			expected := int64(4 + row)
+			if !valuesArray.IsValid(index) || valuesArray.Value(index) != expected {
+				t.Fatalf("row %d=%v, want %d", row, valuesArray.Value(index), expected)
+			}
+			row++
+		}
+	}
+	if row != 3 {
+		t.Fatalf("validated %d rows, want 3", row)
+	}
+}
+
+func TestParquetFilterGuaranteesKeepNullSemantics(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "nullable.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	builder := array.NewInt64Builder(memory.NewGoAllocator())
+	builder.Append(5)
+	builder.AppendNull()
+	builder.Append(6)
+	builder.Append(7)
+	valuesArray := builder.NewInt64Array()
+	builder.Release()
+	defer valuesArray.Release()
+	values, err := NewSeriesFromArrow("value", valuesArray)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer values.Close()
+	df, err := newDataFrame(engine, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ScanParquet(path).Filter(Col("value").Ge(Lit(int64(5)))).Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if result.Height() != 3 {
+		t.Fatalf("expected null filter to keep three values, got %d", result.Height())
 	}
 }
 

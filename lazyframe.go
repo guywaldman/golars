@@ -42,6 +42,10 @@ type recordSource interface {
 	Release()
 }
 
+type filterGuaranteeSource interface {
+	FiltersFullyMatch() bool
+}
+
 // LazyFrame is a deferred logical plan. Constructing transformations does not
 // touch data; errors are returned by terminal methods.
 type LazyFrame struct {

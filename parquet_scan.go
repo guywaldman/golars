@@ -62,7 +62,7 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 		closeAll()
 		return nil, err
 	}
-	rowGroups, err := parquetRowGroupIndices(reader, schema, request.filters)
+	rowGroups, fullMatches, err := parquetRowGroupSelectionWithGuarantees(reader, schema, request.filters)
 	if err != nil {
 		closeAll()
 		return nil, err
@@ -78,7 +78,15 @@ func newParquetRecordSource(ctx context.Context, engine *Engine, reader *parquet
 		closeAll()
 		return nil, err
 	}
-	return &fileSource{reader: recordReader, closers: fileClosers}, nil
+	var source recordSource = recordReader
+	filtersFullyMatch := len(fullMatches) > 0
+	for _, full := range fullMatches {
+		filtersFullyMatch = filtersFullyMatch && full
+	}
+	if len(request.filters) > 0 {
+		source = newParquetFilterSource(recordReader, reader, rowGroups, fullMatches)
+	}
+	return &fileSource{reader: source, closers: fileClosers, filtersFullyMatch: filtersFullyMatch}, nil
 }
 
 type parquetFilter struct {
@@ -148,8 +156,25 @@ func invertParquetComparison(name string) string {
 }
 
 func parquetRowGroupIndices(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, error) {
+	indices, _, err := parquetRowGroupSelection(reader, schema, filters)
+	return indices, err
+}
+
+func parquetRowGroupSelection(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, bool, error) {
+	indices, fullMatches, err := parquetRowGroupSelectionWithGuarantees(reader, schema, filters)
+	if err != nil {
+		return nil, false, err
+	}
+	allMatch := len(fullMatches) > 0
+	for _, full := range fullMatches {
+		allMatch = allMatch && full
+	}
+	return indices, allMatch, nil
+}
+
+func parquetRowGroupSelectionWithGuarantees(reader *parquetfile.Reader, schema *arrow.Schema, filters []*exprNode) ([]int, []bool, error) {
 	if len(filters) == 0 || schema == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	parsed := make([][]parquetFilter, 0, len(filters))
 	for _, filter := range filters {
@@ -158,17 +183,22 @@ func parquetRowGroupIndices(reader *parquetfile.Reader, schema *arrow.Schema, fi
 			parsed = append(parsed, predicates)
 		}
 	}
-	if len(parsed) == 0 {
-		return nil, nil
+	if len(parsed) == 0 || len(parsed) != len(filters) {
+		return nil, nil, nil
 	}
 	indices := make([]int, 0, reader.NumRowGroups())
+	fullMatches := make([]bool, 0, reader.NumRowGroups())
 	for rowGroup := 0; rowGroup < reader.NumRowGroups(); rowGroup++ {
 		mayMatch := true
+		fullyMatches := true
 		for _, predicates := range parsed {
 			for _, predicate := range predicates {
 				if !parquetRowGroupMayMatch(reader.RowGroup(rowGroup), schema, predicate) {
 					mayMatch = false
 					break
+				}
+				if !parquetRowGroupFullyMatches(reader.RowGroup(rowGroup), schema, predicate) {
+					fullyMatches = false
 				}
 			}
 			if !mayMatch {
@@ -177,9 +207,75 @@ func parquetRowGroupIndices(reader *parquetfile.Reader, schema *arrow.Schema, fi
 		}
 		if mayMatch {
 			indices = append(indices, rowGroup)
+			fullMatches = append(fullMatches, fullyMatches)
 		}
 	}
-	return indices, nil
+	return indices, fullMatches, nil
+}
+
+func parquetRowGroupFullyMatches(rowGroup *parquetfile.RowGroupReader, schema *arrow.Schema, predicate parquetFilter) bool {
+	fields := schema.FieldIndices(predicate.column)
+	if len(fields) != 1 || fields[0] >= rowGroup.NumColumns() {
+		return false
+	}
+	field := schema.Field(fields[0])
+	column, err := rowGroup.MetaData().ColumnChunk(fields[0])
+	if err != nil {
+		return false
+	}
+	stats, err := column.Statistics()
+	if err != nil || stats == nil {
+		return false
+	}
+	if predicate.op == "is_null" || predicate.op == "is_valid" {
+		if !stats.HasNullCount() {
+			return false
+		}
+		nulls := stats.NullCount()
+		if predicate.op == "is_null" {
+			return nulls == rowGroup.NumRows()
+		}
+		return nulls == 0
+	}
+	if !stats.HasMinMax() || !stats.HasNullCount() || stats.NullCount() != 0 {
+		return false
+	}
+	switch field.Type.ID() {
+	case arrow.BOOL,
+		arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
+		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64,
+		arrow.DATE32, arrow.DATE64, arrow.TIMESTAMP:
+	default:
+		// Keep full-match elimination conservative for floating-point NaNs,
+		// truncated binary statistics, and types without exact bounds.
+		return false
+	}
+	minimum, maximum, ok := parquetStatBounds(stats, field.Type)
+	if !ok {
+		return false
+	}
+	literal, err := parquetLiteralScalar(predicate.value, field.Type)
+	if err != nil || literal == nil || !literal.IsValid() {
+		return false
+	}
+	minComparison := comparePruningScalars(minimum, literal)
+	maxComparison := comparePruningScalars(maximum, literal)
+	switch predicate.op {
+	case "equal":
+		return minComparison == 0 && maxComparison == 0
+	case "not_equal":
+		return minComparison > 0 || maxComparison < 0
+	case "greater":
+		return minComparison > 0
+	case "greater_equal":
+		return minComparison >= 0
+	case "less":
+		return maxComparison < 0
+	case "less_equal":
+		return maxComparison <= 0
+	default:
+		return false
+	}
 }
 
 func parquetRowGroupMayMatch(rowGroup *parquetfile.RowGroupReader, schema *arrow.Schema, predicate parquetFilter) bool {

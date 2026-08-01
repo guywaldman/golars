@@ -65,6 +65,9 @@ do not expose the optional range interface are materialized before decoding.
   materializing fallback.
 - Safe simple predicates (`=`, `!=`, `<`, `<=`, `>`, `>=`, `is_null`, and
   `is_not_null`) prune Parquet row groups when valid min/max statistics exist.
+- Local Parquet scans use memory-mapped reads when available; row groups proven
+  to satisfy a predicate skip the per-row filter kernel while partial groups
+  still receive exact evaluation.
 - `LazyFrame.ForEachBatch` executes incrementally, and `LazyFrame.Sink` writes
   Parquet batches without first collecting the complete frame.
 - Regression tests cover row-group selection, range-only reads, batch
