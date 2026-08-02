@@ -45,6 +45,14 @@ func TestStringExpressionsPreserveNullsAndUnicode(t *testing.T) {
 	if ends.Height() != 1 {
 		t.Fatalf("ends height=%d, want 1", ends.Height())
 	}
+	equal, err := df.Filter(Col("name").Eq(Lit(alpha)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer equal.Close()
+	if equal.Height() != 2 {
+		t.Fatalf("equal height=%d, want 2", equal.Height())
+	}
 
 	lengths, err := df.Lazy().Select(Col("name").Str().Lengths().Alias("length")).Collect(context.Background())
 	if err != nil {

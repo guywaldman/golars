@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -179,6 +180,34 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 		return builder.NewBooleanArray(), nil
 	}
 	if name == "str_length" {
+		switch values := args[0].(type) {
+		case *array.String:
+			builder := array.NewInt64Builder(mem)
+			defer builder.Release()
+			builder.Reserve(values.Len())
+			offsets, data := values.ValueOffsets(), values.ValueBytes()
+			for i := 0; i < values.Len(); i++ {
+				if !values.IsValid(i) {
+					builder.UnsafeAppendBoolToBitmap(false)
+					continue
+				}
+				builder.UnsafeAppend(int64(utf8.RuneCount(data[offsets[i]:offsets[i+1]])))
+			}
+			return builder.NewInt64Array(), nil
+		case *array.LargeString:
+			builder := array.NewInt64Builder(mem)
+			defer builder.Release()
+			builder.Reserve(values.Len())
+			offsets, data := values.ValueOffsets(), values.ValueBytes()
+			for i := 0; i < values.Len(); i++ {
+				if !values.IsValid(i) {
+					builder.UnsafeAppendBoolToBitmap(false)
+					continue
+				}
+				builder.UnsafeAppend(int64(utf8.RuneCount(data[offsets[i]:offsets[i+1]])))
+			}
+			return builder.NewInt64Array(), nil
+		}
 		if values, ok := args[0].(array.StringLike); ok {
 			builder := array.NewInt64Builder(mem)
 			defer builder.Release()
@@ -239,6 +268,13 @@ func evalStringPredicateLiteral(name string, input arrow.Array, pattern string, 
 	builder := array.NewBooleanBuilder(mem)
 	defer builder.Release()
 	builder.Reserve(input.Len())
+	patternBytes := []byte(pattern)
+	switch values := input.(type) {
+	case *array.String:
+		return evalStringPredicateBytes(name, values.Len(), values.IsValid, values.ValueOffsets(), values.ValueBytes(), patternBytes, builder), nil
+	case *array.LargeString:
+		return evalStringPredicateBytes(name, values.Len(), values.IsValid, values.ValueOffsets(), values.ValueBytes(), patternBytes, builder), nil
+	}
 	if values, ok := input.(array.StringLike); ok {
 		for i := 0; i < values.Len(); i++ {
 			if !values.IsValid(i) {
@@ -261,6 +297,30 @@ func evalStringPredicateLiteral(name string, input arrow.Array, pattern string, 
 		builder.UnsafeAppend(stringPredicateMatch(name, value.String(), pattern))
 	}
 	return builder.NewBooleanArray(), nil
+}
+
+func evalStringPredicateBytes[Offset int32 | int64](name string, length int, valid func(int) bool, offsets []Offset, data, pattern []byte, builder *array.BooleanBuilder) arrow.Array {
+	for i := 0; i < length; i++ {
+		if !valid(i) {
+			builder.UnsafeAppendBoolToBitmap(false)
+			continue
+		}
+		builder.UnsafeAppend(stringPredicateBytesMatch(name, data[offsets[i]:offsets[i+1]], pattern))
+	}
+	return builder.NewBooleanArray()
+}
+
+func stringPredicateBytesMatch(name string, value, pattern []byte) bool {
+	switch name {
+	case "str_contains":
+		return bytes.Contains(value, pattern)
+	case "str_starts_with":
+		return bytes.HasPrefix(value, pattern)
+	case "str_ends_with":
+		return bytes.HasSuffix(value, pattern)
+	default:
+		return false
+	}
 }
 
 func evalStringPredicateFast(name string, left, right array.StringLike, mem *quotaAllocator) (arrow.Array, error) {

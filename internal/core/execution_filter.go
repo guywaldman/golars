@@ -1,10 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/guywaldman/golars/internal/arrowutil"
@@ -100,6 +102,14 @@ func evalScalarComparison(ctx context.Context, engine *Engine, node *exprNode, b
 	column := batch.Column(indices[0])
 	column.Retain()
 	defer column.Release()
+	if text, ok := literalNode.value.(string); ok {
+		if values, ok := column.(*array.String); ok {
+			return evalStringScalarComparison(values.Len(), values.IsValid, values.ValueOffsets(), values.ValueBytes(), node.name, text, reversed, engine.allocator), true, nil
+		}
+		if values, ok := column.(*array.LargeString); ok {
+			return evalStringScalarComparison(values.Len(), values.IsValid, values.ValueOffsets(), values.ValueBytes(), node.name, text, reversed, engine.allocator), true, nil
+		}
+	}
 	literal, err := comparisonLiteralScalar(literalNode.value, column.DataType())
 	if err != nil {
 		return nil, true, err
@@ -124,6 +134,44 @@ func evalScalarComparison(ctx context.Context, engine *Engine, node *exprNode, b
 	result := arrayOut.MakeArray()
 	out.Release()
 	return result, true, nil
+}
+
+func evalStringScalarComparison[Offset int32 | int64](length int, valid func(int) bool, offsets []Offset, data []byte, op, literal string, reversed bool, mem *quotaAllocator) arrow.Array {
+	builder := array.NewBooleanBuilder(mem)
+	defer builder.Release()
+	builder.Reserve(length)
+	want := []byte(literal)
+	for i := 0; i < length; i++ {
+		if !valid(i) {
+			builder.UnsafeAppendBoolToBitmap(false)
+			continue
+		}
+		comparison := bytes.Compare(data[offsets[i]:offsets[i+1]], want)
+		builder.UnsafeAppend(compareStrings(op, comparison, reversed))
+	}
+	return builder.NewBooleanArray()
+}
+
+func compareStrings(op string, comparison int, reversed bool) bool {
+	if reversed {
+		comparison = -comparison
+	}
+	switch op {
+	case "equal":
+		return comparison == 0
+	case "not_equal":
+		return comparison != 0
+	case "greater":
+		return comparison > 0
+	case "greater_equal":
+		return comparison >= 0
+	case "less":
+		return comparison < 0
+	case "less_equal":
+		return comparison <= 0
+	default:
+		return false
+	}
 }
 
 func comparisonLiteralScalar(value any, dtype arrow.DataType) (scalar.Scalar, error) {
