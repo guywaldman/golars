@@ -1,75 +1,83 @@
 # Cross-language benchmarks
 
-The benchmark pair runs the same lazy Parquet queries against the same
-generated input. The workload names are:
+The benchmark harness runs the same lazy Parquet workloads against golars and
+native Rust Polars. The Go side is a normal Go benchmark (`go test -bench`),
+so its output includes the standard `ns/op`, `B/op`, and `allocs/op` metrics.
 
-- `projection_only` reads three columns without a filter, exercising pure
-  projection pushdown.
-- `filter_select` filters on the sorted `id` column and selects `group_id` and
-  `value`, exercising predicate pruning plus projection pushdown.
-- `compound_filter` combines the sorted `id` predicate with a categorical
-  tenant predicate and projects three columns.
-- `derived_projection` filters, computes a numeric derived column and a string
-  length, then projects the derived result.
-- `grouped_aggregation` applies the `id` filter and runs the fast numeric
-  `group_id`/`value` sum path.
-- `multi_aggregation` groups by a string tenant key and computes sum, mean and
-  count together, exercising the general aggregation path.
-- `string_filter` applies a non-pushdown string prefix predicate and projects
-  three columns.
-- `limit_pushdown` stops after a small filtered result, exercising limit
-  propagation through projection and scan batches.
-- `sorted_topk` filters, sorts by a scan column, and keeps the first 100 rows,
-  exposing top-k and materialization gaps.
-- `window_aggregation` computes a partitioned sum over the filtered rows.
-- `self_join` joins two bounded slices of the same input on the tenant key.
-- `unique_tenant` deduplicates a projected string key.
-- `full_aggregation` groups the complete input without a selective filter.
+## Quick gobench
 
-Generate one input file, then run each implementation in separate processes:
+Generate the input inside the benchmark test process and run one workload at
+5,000 rows:
 
 ```sh
-go run ./cmd/golars-benchmark-data \
-  -output /tmp/golars-benchmark.parquet \
-  -rows 1000000 \
-  -row-group-size 65536
-
-go run ./cmd/golars-benchmark \
-  -dataset /tmp/golars-benchmark.parquet \
-  -query filter_select \
-  -iterations 5
-
-# Portable Go execution for comparison
-go run ./cmd/golars-benchmark \
-  -dataset /tmp/golars-benchmark.parquet \
-  -query filter_select \
-  -native-backend=false \
-  -iterations 5
-
-cargo run --release \
-  --manifest-path benchmarks/polars/Cargo.toml \
-  -- --dataset /tmp/golars-benchmark.parquet \
-  --query filter_select \
-  --iterations 5
+go test ./benchmarks \
+  -run '^$' \
+  -bench . \
+  -benchmem \
+  -benchtime=3x \
+  -args -bench-rows=5000
 ```
 
-Repeat both runner commands with each workload name above. Each emits one JSON
-record containing elapsed time, rows, and peak resident set size. The Go runner
-also reports runtime heap deltas and allocation counters; standard Go
-`-benchmem` reports allocations per operation. The timed Rust path uses its
-normal allocator so the performance result is not perturbed by memory
-instrumentation. Compare values on the same machine, CPU, runtime versions,
-input file, thread count, and warmup/iteration settings.
-The `rows` field must agree between implementations before timings are
-interpreted; the Go benchmark tests also check exact shapes and aggregation
-values.
-
-For standard Go allocation reports, run:
+The generated input is deterministic. `-bench-cutoff` defaults to half the
+generated row count, so the same command works for every scale. To benchmark
+an existing Parquet file instead:
 
 ```sh
-go test ./benchmarks -run '^$' -bench . -benchmem \
-  -args -bench-dataset=/tmp/golars-benchmark.parquet -bench-cutoff=500000
+go test ./benchmarks \
+  -run '^$' \
+  -bench . \
+  -benchmem \
+  -benchtime=3x \
+  -args \
+  -bench-dataset=/tmp/golars-benchmark.parquet \
+  -bench-cutoff=500000
 ```
 
-The Rust project is pinned to the Polars version in its lockfile. Update it
-deliberately when changing the comparison baseline.
+The bundled native backend is enabled by default. Use
+`-args -bench-native=false` to measure the portable Go executor.
+
+## Go vs native Polars across scales
+
+Run the complete workload set at the default scales (5K, 10K, 200K, 500K,
+1M, and 5M rows):
+
+```sh
+./benchmarks/run.sh
+```
+
+Add 10M when the machine has enough time and memory:
+
+```sh
+GOLARS_BENCH_SCALES="5000 10000 200000 500000 1000000 5000000 10000000" \
+./benchmarks/run.sh
+```
+
+The script builds the pinned Rust Polars runner when needed, creates one
+deterministic Parquet file per scale, runs Go's `-benchmem` benchmarks, and
+runs each equivalent Polars query with matching warmups and iterations. It
+prints the result directory; Go output is stored as `${rows}-go.txt` and the
+Polars measurements as `${rows}-polars-${query}.json`.
+
+Use fewer scales while iterating:
+
+```sh
+GOLARS_BENCH_SCALES="5000 200000" \
+GOLARS_BENCH_TIME=1x \
+GOLARS_BENCH_POLARS_ITERATIONS=1 \
+./benchmarks/run.sh
+```
+
+`GOMAXPROCS` and `POLARS_MAX_THREADS` should be set to the same value when
+comparing implementations, for example:
+
+```sh
+GOMAXPROCS=2 POLARS_MAX_THREADS=2 ./benchmarks/run.sh
+```
+
+Compare runs only on the same machine, CPU, Go/Rust versions, thread count,
+input, warmup, and iteration settings. Verify that result shapes and row
+counts agree before interpreting timings. The tests in this package validate
+the canonical result shapes and representative values for every workload.
+
+The Rust baseline is pinned by `benchmarks/polars/Cargo.lock`; update it
+deliberately when changing the comparison version.

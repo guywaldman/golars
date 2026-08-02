@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -11,7 +12,39 @@ import (
 )
 
 var benchmarkDataset = flag.String("bench-dataset", "", "Parquet input for the cross-language benchmarks")
-var benchmarkCutoff = flag.Int64("bench-cutoff", DefaultCutoff, "inclusive id filter cutoff")
+var benchmarkRows = flag.Int64("bench-rows", 0, "generate a deterministic Parquet input with this many rows")
+var benchmarkRowGroupSize = flag.Int64("bench-row-group-size", DefaultRowGroupSize, "row-group size for a generated benchmark input")
+var benchmarkCutoff = flag.Int64("bench-cutoff", -1, "inclusive id filter cutoff; defaults to half the generated input")
+var benchmarkNative = flag.Bool("bench-native", true, "use the bundled native backend when available")
+
+var generatedBenchmarkDataset string
+var generatedBenchmarkDirectory string
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if *benchmarkDataset == "" && os.Getenv("GOLARS_BENCH_DATASET") == "" && *benchmarkRows > 0 {
+		if *benchmarkRowGroupSize <= 0 {
+			_, _ = os.Stderr.WriteString("-bench-row-group-size must be positive\n")
+			os.Exit(2)
+		}
+		directory, err := os.MkdirTemp("", "golars-benchmark-")
+		if err != nil {
+			_, _ = os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(2)
+		}
+		generatedBenchmarkDirectory = directory
+		generatedBenchmarkDataset = filepath.Join(directory, "input.parquet")
+		if err := WriteDataset(generatedBenchmarkDataset, *benchmarkRows, *benchmarkRowGroupSize); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(2)
+		}
+	}
+	exitCode := m.Run()
+	if generatedBenchmarkDirectory != "" {
+		_ = os.RemoveAll(generatedBenchmarkDirectory)
+	}
+	os.Exit(exitCode)
+}
 
 func BenchmarkProjectionOnly(b *testing.B) {
 	benchmarkQuery(b, ProjectionOnly)
@@ -71,27 +104,43 @@ func benchmarkQuery(b *testing.B, query Query) {
 		path = os.Getenv("GOLARS_BENCH_DATASET")
 	}
 	if path == "" {
-		b.Skip("set -bench-dataset or GOLARS_BENCH_DATASET")
+		path = generatedBenchmarkDataset
+	}
+	if path == "" {
+		b.Skip("set -bench-dataset, GOLARS_BENCH_DATASET, or -bench-rows")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		b.Fatal(err)
 	}
 	engine, err := golars.NewEngine(
-		golars.WithBatchSize(DefaultRowGroupSize),
+		golars.WithBatchSize(*benchmarkRowGroupSize),
 		golars.WithParallelism(runtime.GOMAXPROCS(0)),
+		golars.WithNativeBackend(*benchmarkNative),
 	)
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer engine.Close()
 	ctx := context.Background()
+	cutoff := *benchmarkCutoff
+	if cutoff < 0 {
+		cutoff = DefaultCutoff
+		if *benchmarkRows > 0 {
+			cutoff = *benchmarkRows / 2
+		}
+	}
+	warmup, err := Execute(ctx, engine, path, query, cutoff)
+	if err != nil {
+		b.Fatal(err)
+	}
+	warmup.Close()
 	var rows int64
 	b.SetBytes(info.Size())
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result, err := Execute(ctx, engine, path, query, *benchmarkCutoff)
+		result, err := Execute(ctx, engine, path, query, cutoff)
 		if err != nil {
 			b.Fatal(err)
 		}

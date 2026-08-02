@@ -75,11 +75,11 @@ jobs:
           cache: true
       - name: Build benchmark input and runners
         run: |
-          go run ./cmd/golars-benchmark-data \
+          go run ./benchmarks/cmd/golars-benchmark-data \
             -output /tmp/golars-benchmark.parquet \
             -rows 1000000 \
             -row-group-size 65536
-          go build -o /tmp/golars-benchmark ./cmd/golars-benchmark
+          go build -o /tmp/golars-benchmark ./benchmarks/cmd/golars-benchmark
           cargo build --manifest-path benchmarks/polars/Cargo.toml --release
       - name: Compare native Go with Rust Polars
         env:
