@@ -197,6 +197,9 @@ jobs:
           mkdir -p internal/native/assets
           cp -R native-assets-artifact/assets/. internal/native/assets/
           cp native-assets-artifact/embedded_*.go internal/native/
+          # Keep the downloaded artifact outside the module tree. Otherwise
+          # `go test ./...` treats its generated files as another package.
+          rm -rf native-assets-artifact
           gofmt -w internal/native/embedded_*.go
       - name: Run tests on native architecture
         run: go test ./... -count=1
