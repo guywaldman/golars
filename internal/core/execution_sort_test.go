@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -38,9 +39,41 @@ func TestSortUsesTypedOrdering(t *testing.T) {
 	}
 }
 
+func TestSortLimitKeepsStableTopKRows(t *testing.T) {
+	ids, err := NewSeries("id", []int64{0, 1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ids.Close()
+	values, err := NewSeries("value", []float64{3, 5, 5, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer values.Close()
+	df, err := NewDataFrame(ids, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	plan := df.Lazy().Sort(Col("value").Desc()).Limit(2)
+	defer plan.Close()
+	result, err := plan.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if got := int64ColumnValues(t, result, "id"); !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Fatalf("top-k ids=%v", got)
+	}
+}
+
 func sortedInt64Values(t *testing.T, df *DataFrame) []int64 {
+	return int64ColumnValues(t, df, "value")
+}
+
+func int64ColumnValues(t *testing.T, df *DataFrame, name string) []int64 {
 	t.Helper()
-	column, err := df.Column("value")
+	column, err := df.Column(name)
 	if err != nil {
 		t.Fatal(err)
 	}

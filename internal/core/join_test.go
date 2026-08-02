@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,4 +51,20 @@ func TestJoinVariantsAndComputedKeys(t *testing.T) {
 	require.NoError(t, err)
 	defer computed.Close()
 	require.Equal(t, int64(4), computed.Height())
+
+	leftJoin, err := left.Join(right, []Expr{Col("id")}, []Expr{Col("id")}, WithJoinType(JoinLeft))
+	require.NoError(t, err)
+	defer leftJoin.Close()
+	score, err := leftJoin.Column("score")
+	require.NoError(t, err)
+	defer score.Close()
+	chunked := score.ArrowChunked()
+	defer chunked.Release()
+	chunk := chunked.Chunk(0)
+	first, err := scalar.GetScalar(chunk, 0)
+	require.NoError(t, err)
+	require.False(t, first.IsValid())
+	second, err := scalar.GetScalar(chunk, 1)
+	require.NoError(t, err)
+	require.Equal(t, int64(20), second.(*scalar.Int64).Value)
 }

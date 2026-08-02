@@ -30,6 +30,11 @@ func uniqueDataFrame(df *DataFrame, columns []string, engine *Engine) (*DataFram
 			indices = append(indices, fields[0])
 		}
 	}
+	if len(indices) == 1 {
+		if rows, ok := uniqueRowsFast(batch.Column(indices[0])); ok {
+			return subsetDataFrame(batch, rows, engine)
+		}
+	}
 	seen := make(map[string]struct{}, batch.NumRows())
 	rows := make([]int64, 0, batch.NumRows())
 	for row := int64(0); row < batch.NumRows(); row++ {
@@ -44,6 +49,53 @@ func uniqueDataFrame(df *DataFrame, columns []string, engine *Engine) (*DataFram
 		rows = append(rows, row)
 	}
 	return subsetDataFrame(batch, rows, engine)
+}
+
+func uniqueRowsFast(values arrow.Array) ([]int64, bool) {
+	rows := make([]int64, 0, values.Len())
+	if stringValues, ok := values.(array.StringLike); ok {
+		seen := make(map[string]struct{}, values.Len())
+		nullSeen := false
+		for row := 0; row < values.Len(); row++ {
+			if !stringValues.IsValid(row) {
+				if nullSeen {
+					continue
+				}
+				nullSeen = true
+				rows = append(rows, int64(row))
+				continue
+			}
+			key := stringValues.Value(row)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			rows = append(rows, int64(row))
+		}
+		return rows, true
+	}
+	if intValues, ok := values.(*array.Int64); ok {
+		seen := make(map[int64]struct{}, values.Len())
+		nullSeen := false
+		for row := 0; row < values.Len(); row++ {
+			if !intValues.IsValid(row) {
+				if nullSeen {
+					continue
+				}
+				nullSeen = true
+				rows = append(rows, int64(row))
+				continue
+			}
+			key := intValues.Value(row)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			rows = append(rows, int64(row))
+		}
+		return rows, true
+	}
+	return nil, false
 }
 
 func rowKey(batch arrow.RecordBatch, columns []int, row int64) (string, error) {

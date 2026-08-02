@@ -7,6 +7,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/guywaldman/golars/internal/arrowutil"
 )
@@ -119,14 +121,19 @@ func collectBlockingPlan(ctx context.Context, engine *Engine, node *planNode) (*
 	if node == nil {
 		return nil, ErrInvalidPlan
 	}
-	switch node.kind {
-	case planTable, planSource:
+	// Join/window/materializing plans recurse here, but a streamable subtree
+	// should still execute through the batch pipeline. Materializing it first
+	// defeats predicate/projection/limit pushdown and can retain the entire
+	// source just to feed a blocking operator.
+	if !containsJoin(node) && !containsWindow(node) && !containsMaterializing(node) {
 		lf := &LazyFrame{engine: engine, plan: node}
 		table, err := lf.collectTable(ctx, nil)
 		if err != nil {
 			return nil, err
 		}
 		return newDataFrameWithTable(table, engine), nil
+	}
+	switch node.kind {
 	case planJoin:
 		left, err := collectBlockingPlan(ctx, engine, node.input)
 		if err != nil {
@@ -164,6 +171,29 @@ func collectBlockingPlan(ctx context.Context, engine *Engine, node *planNode) (*
 		}
 		defer input.Close()
 		return sortDataFrame(ctx, input, node.exprs)
+	}
+	if node.kind == planLimit && node.input != nil && node.input.kind == planSort && node.limit > 0 {
+		base, baseErr := collectBlockingPlan(ctx, engine, node.input.input)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		top, handled, topErr := sortLimitDataFrame(ctx, base, node.input.exprs, node.limit)
+		if topErr != nil {
+			base.Close()
+			return nil, topErr
+		}
+		if handled {
+			base.Close()
+			return top, nil
+		}
+		sorted, sortErr := sortDataFrame(ctx, base, node.input.exprs)
+		base.Close()
+		if sortErr != nil {
+			return nil, sortErr
+		}
+		limited, limitErr := sorted.Limit(node.limit)
+		sorted.Close()
+		return limited, limitErr
 	}
 	input, err := collectBlockingPlan(ctx, engine, node.input)
 	if err != nil {
@@ -270,7 +300,7 @@ func joinDataFrames(ctx context.Context, engine *Engine, left, right *DataFrame,
 	defer rightBatch.Release()
 
 	if node.joinType == JoinCross {
-		return buildJoinedFrame(engine, leftBatch, rightBatch, crossPairs(leftBatch.NumRows(), rightBatch.NumRows()), node)
+		return buildJoinedFrame(ctx, engine, leftBatch, rightBatch, crossPairs(leftBatch.NumRows(), rightBatch.NumRows()), node)
 	}
 	leftKeys, err := evalJoinKeys(ctx, engine, leftBatch, node.leftKeys)
 	if err != nil {
@@ -342,7 +372,7 @@ func joinDataFrames(ctx context.Context, engine *Engine, left, right *DataFrame,
 			}
 		}
 	}
-	return buildJoinedFrame(engine, leftBatch, rightBatch, pairs, node)
+	return buildJoinedFrame(ctx, engine, leftBatch, rightBatch, pairs, node)
 }
 
 func wholeTableBatch(table arrow.Table, engine *Engine) (arrow.RecordBatch, *array.TableReader, error) {
@@ -428,15 +458,13 @@ func crossPairs(leftRows, rightRows int64) []joinPair {
 	return result
 }
 
-func buildJoinedFrame(engine *Engine, left, right arrow.RecordBatch, pairs []joinPair, node *planNode) (*DataFrame, error) {
+func buildJoinedFrame(ctx context.Context, engine *Engine, left, right arrow.RecordBatch, pairs []joinPair, node *planNode) (*DataFrame, error) {
 	leftFields := left.Schema().Fields()
 	rightFields := right.Schema().Fields()
 	fields := make([]arrow.Field, 0, len(leftFields)+len(rightFields))
-	builders := make([]array.Builder, 0, cap(fields))
 	used := make(map[string]struct{}, len(leftFields)+len(rightFields))
 	for _, field := range leftFields {
 		fields = append(fields, field)
-		builders = append(builders, array.NewBuilder(engine.allocator, field.Type))
 		used[field.Name] = struct{}{}
 	}
 	includeRight := node.joinType != JoinSemi && node.joinType != JoinAnti
@@ -459,41 +487,58 @@ func buildJoinedFrame(engine *Engine, left, right arrow.RecordBatch, pairs []joi
 			used[name] = struct{}{}
 			field.Name = name
 			fields = append(fields, field)
-			builders = append(builders, array.NewBuilder(engine.allocator, field.Type))
 		}
 	}
-	defer func() {
-		for _, builder := range builders {
-			builder.Release()
-		}
-	}()
-	for _, pair := range pairs {
-		for column, builder := range builders {
-			var source arrow.Array
-			var row int64
-			if column < len(leftFields) {
-				source, row = left.Column(column), pair.left
-			} else {
-				source, row = right.Column(column-len(leftFields)), pair.right
-			}
-			if row < 0 {
-				builder.AppendNull()
-				continue
-			}
-			value, err := scalar.GetScalar(source, int(row))
-			if err != nil {
-				return nil, err
-			}
-			if err := scalar.Append(builder, value); err != nil {
-				return nil, err
-			}
-		}
+
+	leftIndices, err := joinPairIndices(engine.allocator, pairs, true)
+	if err != nil {
+		return nil, err
 	}
-	columns := make([]arrow.Array, len(builders))
-	for i, builder := range builders {
-		columns[i] = builder.NewArray()
+	defer leftIndices.Release()
+	rightIndices, err := joinPairIndices(engine.allocator, pairs, false)
+	if err != nil {
+		return nil, err
+	}
+	defer rightIndices.Release()
+
+	columns := make([]arrow.Array, 0, len(fields))
+	for column := range leftFields {
+		values, takeErr := compute.TakeArray(compute.WithAllocator(ctx, engine.allocator), left.Column(column), leftIndices)
+		if takeErr != nil {
+			arrowutil.ReleaseArrays(columns)
+			return nil, takeErr
+		}
+		columns = append(columns, values)
+	}
+	if includeRight {
+		for column := range rightFields {
+			values, takeErr := compute.TakeArray(compute.WithAllocator(ctx, engine.allocator), right.Column(column), rightIndices)
+			if takeErr != nil {
+				arrowutil.ReleaseArrays(columns)
+				return nil, takeErr
+			}
+			columns = append(columns, values)
+		}
 	}
 	defer arrowutil.ReleaseArrays(columns)
 	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns))
 	return newDataFrameWithTable(table, engine), nil
+}
+
+func joinPairIndices(allocator memory.Allocator, pairs []joinPair, leftSide bool) (arrow.Array, error) {
+	builder := array.NewInt64Builder(allocator)
+	defer builder.Release()
+	builder.Reserve(len(pairs))
+	for _, pair := range pairs {
+		row := pair.right
+		if leftSide {
+			row = pair.left
+		}
+		if row < 0 {
+			builder.AppendNull()
+			continue
+		}
+		builder.Append(row)
+	}
+	return builder.NewArray(), nil
 }

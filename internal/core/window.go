@@ -51,6 +51,11 @@ func windowPartitions(ctx context.Context, engine *Engine, keys []*exprNode, bat
 		arrays[i] = value
 	}
 	defer arrowutil.ReleaseArrays(arrays)
+	if len(arrays) == 1 {
+		if partitions, ok := windowPartitionsFast(arrays[0], int(batch.NumRows())); ok {
+			return partitions, nil
+		}
+	}
 	byKey := make(map[string]int)
 	partitions := make([][]int, 0)
 	for row := 0; row < int(batch.NumRows()); row++ {
@@ -78,6 +83,69 @@ func windowPartitions(ctx context.Context, engine *Engine, keys []*exprNode, bat
 	return partitions, nil
 }
 
+func windowPartitionsFast(values arrow.Array, rows int) ([][]int, bool) {
+	byKey := make(map[string]int)
+	partitions := make([][]int, 0)
+	nullPartition := -1
+	appendRow := func(index int, row int) {
+		if index == len(partitions) {
+			partitions = append(partitions, nil)
+		}
+		partitions[index] = append(partitions[index], row)
+	}
+	newPartition := func(row int) {
+		partitions = append(partitions, []int{row})
+	}
+	if stringValues, ok := values.(array.StringLike); ok {
+		for row := 0; row < rows; row++ {
+			if !stringValues.IsValid(row) {
+				if nullPartition < 0 {
+					nullPartition = len(partitions)
+					newPartition(row)
+				} else {
+					appendRow(nullPartition, row)
+				}
+				continue
+			}
+			key := stringValues.Value(row)
+			index, exists := byKey[key]
+			if !exists {
+				index = len(partitions)
+				byKey[key] = index
+				newPartition(row)
+				continue
+			}
+			appendRow(index, row)
+		}
+		return partitions, true
+	}
+	if intValues, ok := values.(*array.Int64); ok {
+		byValue := make(map[int64]int)
+		for row := 0; row < rows; row++ {
+			if !intValues.IsValid(row) {
+				if nullPartition < 0 {
+					nullPartition = len(partitions)
+					newPartition(row)
+				} else {
+					appendRow(nullPartition, row)
+				}
+				continue
+			}
+			key := intValues.Value(row)
+			index, exists := byValue[key]
+			if !exists {
+				index = len(partitions)
+				byValue[key] = index
+				newPartition(row)
+				continue
+			}
+			appendRow(index, row)
+		}
+		return partitions, true
+	}
+	return nil, false
+}
+
 func evalWindowAggregate(ctx context.Context, engine *Engine, node *exprNode, partitions [][]int, batch arrow.RecordBatch) (arrow.Array, error) {
 	var input arrow.Array
 	var err error
@@ -90,6 +158,9 @@ func evalWindowAggregate(ctx context.Context, engine *Engine, node *exprNode, pa
 			return nil, err
 		}
 		defer input.Release()
+	}
+	if result, ok, fastErr := evalWindowAggregateFast(engine, node, partitions, batch.NumRows(), input); ok {
+		return result, fastErr
 	}
 	outputType := arrow.PrimitiveTypes.Int64
 	if input != nil {
@@ -147,6 +218,86 @@ func evalWindowAggregate(ctx context.Context, engine *Engine, node *exprNode, pa
 		appendScalar(builder, value)
 	}
 	return builder.NewArray(), nil
+}
+
+func evalWindowAggregateFast(engine *Engine, node *exprNode, partitions [][]int, rows int64, input arrow.Array) (arrow.Array, bool, error) {
+	if node.name == "count_rows" {
+		builder := array.NewInt64Builder(engine.allocator)
+		defer builder.Release()
+		builder.Reserve(int(rows))
+		values := make([]int64, rows)
+		for _, partition := range partitions {
+			count := int64(len(partition))
+			for _, row := range partition {
+				values[row] = count
+			}
+		}
+		builder.AppendValues(values, nil)
+		return builder.NewArray(), true, nil
+	}
+	if input == nil {
+		return nil, false, nil
+	}
+	if node.name == "count" {
+		builder := array.NewInt64Builder(engine.allocator)
+		defer builder.Release()
+		builder.Reserve(int(rows))
+		values := make([]int64, rows)
+		for _, partition := range partitions {
+			var count int64
+			for _, row := range partition {
+				if input.IsValid(int(row)) {
+					count++
+				}
+			}
+			for _, row := range partition {
+				values[row] = count
+			}
+		}
+		builder.AppendValues(values, nil)
+		return builder.NewArray(), true, nil
+	}
+	if node.name != "sum" && node.name != "mean" {
+		return nil, false, nil
+	}
+	values, ok := input.(*array.Float64)
+	if !ok {
+		return nil, false, nil
+	}
+	builder := array.NewFloat64Builder(engine.allocator)
+	defer builder.Release()
+	builder.Reserve(int(rows))
+	output := make([]float64, rows)
+	valid := make([]bool, rows)
+	for _, partition := range partitions {
+		var total float64
+		var count int64
+		for _, row := range partition {
+			if !values.IsValid(row) {
+				continue
+			}
+			total += values.Value(row)
+			count++
+		}
+		if count == 0 {
+			continue
+		}
+		if node.name == "mean" {
+			total /= float64(count)
+		}
+		for _, row := range partition {
+			output[row] = total
+			valid[row] = true
+		}
+	}
+	for row := range output {
+		if valid[row] {
+			builder.Append(output[row])
+		} else {
+			builder.AppendNull()
+		}
+	}
+	return builder.NewArray(), true, nil
 }
 
 func evalWindowRank(ctx context.Context, engine *Engine, node *exprNode, partitions [][]int, batch arrow.RecordBatch) (arrow.Array, error) {
