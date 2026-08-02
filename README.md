@@ -50,17 +50,15 @@ one branch does not invalidate another.
 
 ## Native execution
 
-On supported targets, eligible local Parquet plans run through the bundled
-Rust/Polars backend. The library is embedded in the Go module and loaded with
-CGO-free FFI; consumers only need the normal `go get` and Go build workflow.
-No Rust toolchain, C compiler, shared-library installation, environment
-variables, or companion executable is required. Unsupported targets and plans
-use the portable Go executor automatically. Applications can force the Go
-executor with `WithNativeBackend(false)`. Embedded native assets currently cover
-macOS arm64 and Linux amd64/arm64 in release commits. A development checkout
-without generated assets remains fully functional through the portable executor.
-CI builds native assets and opens a reviewable update PR when the Rust backend
-changes.
+On supported targets, eligible local Parquet plans run through the Rust/Polars
+backend. The target-specific native library is embedded in the Go module and
+loaded with CGO-free FFI; consumers only need the normal `go get` and Go build
+workflow. No Rust toolchain, C compiler, shared-library installation,
+environment variables, network access at runtime, or companion executable is
+required. Native assets currently cover macOS arm64 and Linux amd64/arm64.
+Windows native support is tracked in issue #3. Other targets and plans use the
+portable Go executor automatically. Applications can force the Go executor with
+`WithNativeBackend(false)`.
 
 To consume an unpublished local checkout from another module, use a local
 replacement together with an explicit synthetic version:

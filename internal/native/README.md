@@ -1,11 +1,10 @@
 # Native backend
 
-The native backend is distributed as part of the Go module. Supported targets
-embed their platform library and load it at runtime without CGO, a Rust
-toolchain, or a separately installed shared object. The Go implementation
-remains available as the portable execution path.
+Supported targets embed one compressed platform library directly in this Go
+module. The backend loads without CGO, a Rust toolchain, a separately installed
+shared object, or runtime network access. The portable Go executor remains
+available as the fallback on unsupported targets and plans.
 
-Native libraries are built from `rust/` by CI and copied into the target-specific
-`assets/` directory through a reviewable update PR before publishing a release.
-Consumers do not run Cargo or any setup command. A checkout without generated
-assets uses the portable Go executor.
+The checked-in libraries are refreshed from `rust/` by release maintainers. The
+build-tagged embed files are intentionally small and stable; refreshing an
+asset changes only its compressed binary.

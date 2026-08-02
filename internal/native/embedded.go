@@ -13,9 +13,6 @@ type embeddedLibrary struct {
 	extension string
 }
 
-// Native assets are generated and committed by CI for release branches. A
-// checkout without generated assets remains usable through the portable Go
-// executor.
 var (
 	embeddedLibraryCompressed []byte
 	embeddedLibraryExtension  string

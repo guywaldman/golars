@@ -1,4 +1,4 @@
-//go:build !(darwin || linux || windows) || android || faketime
+//go:build !(darwin || linux) || android || faketime
 
 package native
 

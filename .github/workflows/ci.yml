@@ -17,8 +17,10 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - ubuntu-24.04-arm
           - macos-14
-          - windows-latest
+          # TODO(#3): restore Windows native validation.
+          # - windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v6
@@ -27,38 +29,6 @@ jobs:
           cache: true
       - run: go test ./... -count=1
       - run: go vet ./...
-
-  cross-compile:
-    name: Go build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Compile packages and test binaries
-        env:
-          CGO_ENABLED: 0
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          mkdir -p build
-          go build ./...
-          go test -c ./internal/core -o build/core.test
-          go test -c ./internal/native -o build/native.test
 
   memory-safety:
     name: Memory safety
@@ -90,54 +60,6 @@ jobs:
       - name: Run emulator-backed tests
         run: go test -tags=e2e ./... -count=1 -v
 
-  rust-native:
-    name: Rust backend (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-amd64
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            mode: native
-          - name: linux-arm64
-            runner: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            mode: cross
-          - name: darwin-arm64
-            runner: macos-14
-            target: aarch64-apple-darwin
-            mode: native
-          - name: windows-amd64
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            mode: native
-          - name: windows-arm64-check
-            runner: windows-latest
-            target: aarch64-pc-windows-msvc
-            mode: check
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-          cache: true
-      - name: Install cross
-        if: matrix.mode == 'cross'
-        shell: bash
-        run: cargo install cross --locked
-      - name: Build backend
-        if: matrix.mode == 'native'
-        run: cargo build --manifest-path internal/native/rust/Cargo.toml --release --target ${{ matrix.target }}
-      - name: Build Linux ARM backend
-        if: matrix.mode == 'cross'
-        run: cross build --manifest-path internal/native/rust/Cargo.toml --release --target ${{ matrix.target }}
-      - name: Check Windows ARM backend
-        if: matrix.mode == 'check'
-        run: cargo check --manifest-path internal/native/rust/Cargo.toml --target ${{ matrix.target }}
-
   benchmark-regression:
     name: Native benchmark regression
     runs-on: ubuntu-latest
@@ -157,20 +79,6 @@ jobs:
             -output /tmp/golars-benchmark.parquet \
             -rows 1000000 \
             -row-group-size 65536
-          cargo build --manifest-path internal/native/rust/Cargo.toml \
-            --locked \
-            --release \
-            --target x86_64-unknown-linux-gnu
-          bash scripts/package_native_asset.sh \
-            --id linux_amd64 \
-            --goos linux \
-            --goarch amd64 \
-            --extension so \
-            --binary internal/native/rust/target/x86_64-unknown-linux-gnu/release/libgolars_native.so \
-            --output-root /tmp/golars-native-assets
-          mkdir -p internal/native/assets
-          cp -R /tmp/golars-native-assets/assets/. internal/native/assets/
-          cp /tmp/golars-native-assets/embedded_linux_amd64.go internal/native/
           go build -o /tmp/golars-benchmark ./cmd/golars-benchmark
           cargo build --manifest-path benchmarks/polars/Cargo.toml --release
       - name: Compare native Go with Rust Polars

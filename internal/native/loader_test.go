@@ -9,6 +9,9 @@ func TestEmbeddedRuntime(t *testing.T) {
 	nativeRuntime, err := Open()
 	if err != nil {
 		if errors.Is(err, ErrUnavailable) {
+			if len(embeddedLibraryCompressed) > 0 {
+				t.Fatalf("native backend unexpectedly unavailable on a bundled target: %v", err)
+			}
 			t.Skipf("native backend unavailable: %v", err)
 		}
 		t.Fatalf("Open() error = %v", err)
