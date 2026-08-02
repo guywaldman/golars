@@ -8,7 +8,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
-const maxParallelRowGroupReaders = 4
+const maxParallelRowGroupReaders = 12
 
 type parallelGroup struct {
 	rowGroups []int
