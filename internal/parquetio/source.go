@@ -20,7 +20,11 @@ func OpenFile(ctx context.Context, path string, config Config, request Request) 
 	if err != nil {
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{BatchSize: config.BatchSize, Parallel: config.Parallel}
+	props := pqarrow.ArrowReadProperties{
+		BatchSize:          config.BatchSize,
+		Parallel:           config.Parallel,
+		PreAllocBinaryData: true,
+	}
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -42,7 +46,11 @@ func OpenReader(ctx context.Context, file io.ReadCloser, config Config, request 
 		_ = file.Close()
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{BatchSize: config.BatchSize, Parallel: config.Parallel}
+	props := pqarrow.ArrowReadProperties{
+		BatchSize:          config.BatchSize,
+		Parallel:           config.Parallel,
+		PreAllocBinaryData: true,
+	}
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -68,7 +76,11 @@ func OpenRanged(ctx context.Context, store storage.RangeObjectStore, path string
 		_ = ranged.Close()
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{BatchSize: config.BatchSize, Parallel: config.Parallel}
+	props := pqarrow.ArrowReadProperties{
+		BatchSize:          config.BatchSize,
+		Parallel:           config.Parallel,
+		PreAllocBinaryData: true,
+	}
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -164,8 +176,28 @@ func openParquetReader(ctx context.Context, config Config, reader *parquetfile.R
 			return nil, projectionErr
 		}
 		requestedSchema := parquetRequestedSchema(schema, columnIndices)
-		projected := newProjectionSource(ctx, config.Allocator, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches, request.ProjectionOnlyBatches)
+		parallelism := config.Parallelism
+		if request.Limit > 0 {
+			parallelism = 1
+		}
+		projected := newProjectionSource(ctx, config.Allocator, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches, request.ProjectionOnlyBatches, parallelism)
 		return &fileSource{reader: projected, closers: fileClosers}, nil
+	}
+	// The Arrow reader parallelizes columns, but row groups remain serial. For
+	// local files, independent readers improve scan throughput while keeping the
+	// bounded source contract. Exact filter evaluation remains in the plan.
+	if local && config.Parallel && config.Parallelism > 1 && shouldParallelizeLocalScan(request) {
+		selectedGroups := rowGroups
+		if len(selectedGroups) == 0 {
+			selectedGroups = make([]int, reader.NumRowGroups())
+			for i := range selectedGroups {
+				selectedGroups[i] = i
+			}
+		}
+		if len(selectedGroups) > 1 {
+			parallel := newParallelSource(ctx, arrowReader, schema, columnIndices, selectedGroups, config.Parallelism)
+			return &fileSource{reader: parallel, closers: fileClosers}, nil
+		}
 	}
 	recordReader, err := arrowReader.GetRecordReader(ctx, columnIndices, rowGroups)
 	if err != nil {
@@ -181,6 +213,16 @@ func openParquetReader(ctx context.Context, config Config, reader *parquetfile.R
 		source = newFilterSource(recordReader, reader, rowGroups, fullMatches)
 	}
 	return &fileSource{reader: source, closers: fileClosers, filtersFullyMatch: filtersFullyMatch}, nil
+}
+
+func shouldParallelizeLocalScan(request Request) bool {
+	if request.Limit > 0 {
+		return false
+	}
+	// Keep filtered projections on one reader when the predicate column is also
+	// part of the output. A downstream blocking operator may only need a small
+	// subset, so fanning out those row groups would eagerly duplicate buffers.
+	return len(request.Filters) == 0 || len(request.FilterOnlyColumns) > 0
 }
 
 var _ parquet.ReaderAtSeeker = (*rangeReaderAtSeeker)(nil)

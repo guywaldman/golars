@@ -279,6 +279,18 @@ type joinPair struct {
 	right int64
 }
 
+type joinLookupKey struct {
+	kind    uint8
+	text    string
+	integer int64
+}
+
+const (
+	joinKeyEncoded uint8 = iota
+	joinKeyString
+	joinKeyInt64
+)
+
 func joinDataFrames(ctx context.Context, engine *Engine, left, right *DataFrame, node *planNode) (*DataFrame, error) {
 	if err := left.ensureOpen(); err != nil {
 		return nil, err
@@ -326,7 +338,7 @@ func joinDataFrames(ctx context.Context, engine *Engine, left, right *DataFrame,
 		leftKeys[i], rightKeys[i] = coercedLeft, coercedRight
 	}
 
-	rightIndex := make(map[string][]int64, rightBatch.NumRows())
+	rightIndex := make(map[joinLookupKey][]int64, rightBatch.NumRows())
 	for row := int64(0); row < rightBatch.NumRows(); row++ {
 		key, ok, keyErr := joinKey(rightKeys, row)
 		if keyErr != nil {
@@ -391,6 +403,9 @@ func wholeTableBatch(table arrow.Table, engine *Engine) (arrow.RecordBatch, *arr
 		}
 		return empty, reader, nil
 	}
+	if len(batches) == 1 {
+		return batches[0], reader, nil
+	}
 	columns := make([]arrow.Array, table.NumCols())
 	for column := range columns {
 		parts := make([]arrow.Array, 0, len(batches))
@@ -432,20 +447,36 @@ func evalJoinKeys(ctx context.Context, engine *Engine, batch arrow.RecordBatch, 
 	return result, nil
 }
 
-func joinKey(keys []arrow.Array, row int64) (string, bool, error) {
+func joinKey(keys []arrow.Array, row int64) (joinLookupKey, bool, error) {
+	if len(keys) == 1 {
+		if values, ok := keys[0].(array.StringLike); ok {
+			index := int(row)
+			if !values.IsValid(index) {
+				return joinLookupKey{}, false, nil
+			}
+			return joinLookupKey{kind: joinKeyString, text: values.Value(index)}, true, nil
+		}
+		if values, ok := keys[0].(*array.Int64); ok {
+			index := int(row)
+			if !values.IsValid(index) {
+				return joinLookupKey{}, false, nil
+			}
+			return joinLookupKey{kind: joinKeyInt64, integer: values.Value(index)}, true, nil
+		}
+	}
 	var builder strings.Builder
 	for _, key := range keys {
 		value, err := scalar.GetScalar(key, int(row))
 		if err != nil {
-			return "", false, err
+			return joinLookupKey{}, false, err
 		}
 		if !value.IsValid() {
-			return "", false, nil
+			return joinLookupKey{}, false, nil
 		}
 		text := value.String()
 		fmt.Fprintf(&builder, "%d:%d:%s|", value.DataType().ID(), len(text), text)
 	}
-	return builder.String(), true, nil
+	return joinLookupKey{kind: joinKeyEncoded, text: builder.String()}, true, nil
 }
 
 func crossPairs(leftRows, rightRows int64) []joinPair {

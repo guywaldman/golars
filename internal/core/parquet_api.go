@@ -13,6 +13,7 @@ func parquetConfig(engine *Engine, config scanConfig) parquetio.Config {
 		Allocator:     engine.allocator,
 		BatchSize:     config.batchSize,
 		Parallel:      engine.parallelism > 1,
+		Parallelism:   engine.parallelism,
 		MissingColumn: parquetMissingColumn,
 	}
 }
@@ -28,6 +29,7 @@ func parquetRequest(request scanRequest) parquetio.Request {
 		ProjectionColumns:     request.projectionColumns,
 		FilterOnlyColumns:     request.filterOnlyColumns,
 		ProjectionOnlyBatches: request.projectionOnlyBatches,
+		Limit:                 request.limit,
 		Filters:               predicates,
 		SelectionApplicable:   applicable && len(request.filters) > 0,
 	}

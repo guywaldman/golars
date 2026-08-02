@@ -22,10 +22,11 @@ type projectionSource struct {
 	projectionOnly   bool
 	runs             []projectionRun
 	runIndex         int
-	currentReader    pqarrow.RecordReader
+	currentReader    Source
 	current          arrow.RecordBatch
 	currentOwned     bool
 	currentFull      bool
+	parallelism      int
 	err              error
 }
 
@@ -42,6 +43,7 @@ func newProjectionSource(
 	allColumns, projectedColumns, rowGroups []int,
 	fullMatches []bool,
 	projectionOnly bool,
+	parallelism int,
 ) *projectionSource {
 	runs := make([]projectionRun, 0, len(rowGroups))
 	for i, rowGroup := range rowGroups {
@@ -60,6 +62,7 @@ func newProjectionSource(
 		allColumns:       append([]int(nil), allColumns...),
 		projectedColumns: append([]int(nil), projectedColumns...),
 		projectionOnly:   projectionOnly,
+		parallelism:      parallelism,
 		runs:             runs,
 	}
 }
@@ -103,12 +106,16 @@ func (s *projectionSource) Next() bool {
 		if run.full {
 			columns = s.projectedColumns
 		}
-		reader, err := s.reader.GetRecordReader(s.ctx, columns, run.rowGroups)
-		if err != nil {
-			s.err = err
-			return false
+		if run.full && s.parallelism > 1 && len(run.rowGroups) > 1 {
+			s.currentReader = newParallelSource(s.ctx, s.reader, s.outputSchema, columns, run.rowGroups, s.parallelism)
+		} else {
+			reader, err := s.reader.GetRecordReader(s.ctx, columns, run.rowGroups)
+			if err != nil {
+				s.err = err
+				return false
+			}
+			s.currentReader = reader
 		}
-		s.currentReader = reader
 		s.currentFull = run.full
 	}
 }

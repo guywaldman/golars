@@ -34,6 +34,7 @@ func main() {
 	queryName := flag.String("query", string(benchmarks.FilterSelect), "benchmark query")
 	cutoff := flag.Int64("cutoff", benchmarks.DefaultCutoff, "inclusive id filter cutoff")
 	batchSize := flag.Int64("batch-size", benchmarks.DefaultRowGroupSize, "execution batch size")
+	memoryLimit := flag.Int64("memory-limit", golars.DefaultMemoryLimit, "engine memory limit in bytes")
 	iterations := flag.Int("iterations", 5, "measured iterations")
 	warmup := flag.Int("warmup", 1, "warmup iterations")
 	flag.Parse()
@@ -44,14 +45,15 @@ func main() {
 	if !query.Valid() {
 		fatal(fmt.Errorf("unknown query %q", *queryName))
 	}
-	if *iterations <= 0 || *warmup < 0 || *batchSize <= 0 {
-		fatal(fmt.Errorf("iterations and batch size must be positive; warmup cannot be negative"))
+	if *iterations <= 0 || *warmup < 0 || *batchSize <= 0 || *memoryLimit <= 0 {
+		fatal(fmt.Errorf("iterations, batch size, and memory limit must be positive; warmup cannot be negative"))
 	}
 	if _, err := os.Stat(*dataset); err != nil {
 		fatal(err)
 	}
 	engine, err := golars.NewEngine(
 		golars.WithBatchSize(*batchSize),
+		golars.WithMemoryLimit(*memoryLimit),
 		golars.WithParallelism(runtime.GOMAXPROCS(0)),
 	)
 	if err != nil {

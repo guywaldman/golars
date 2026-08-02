@@ -17,6 +17,7 @@ type scanRequest struct {
 	projectionColumns     []string
 	filterOnlyColumns     []string
 	projectionOnlyBatches bool
+	limit                 int64
 	filters               []*exprNode
 }
 
@@ -39,6 +40,7 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 	projectionColumns := make(map[string]struct{})
 	filterColumns := make(map[string]struct{})
 	var requestFilters []*exprNode
+	var limit int64
 	for _, node := range nodes[1 : len(nodes)-1] {
 		switch node.kind {
 		case planFilter:
@@ -49,7 +51,9 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 				requestFilters = append(requestFilters, filter)
 			}
 		case planLimit:
-			// Limits do not require additional columns.
+			if node.limit > 0 && (limit == 0 || node.limit < limit) {
+				limit = node.limit
+			}
 		default:
 			return scanRequest{}
 		}
@@ -74,6 +78,7 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		projectionColumns:     sortedColumnNames(projectionColumns),
 		filterOnlyColumns:     filterOnlyColumnNames(filterColumns, projectionColumns),
 		projectionOnlyBatches: true,
+		limit:                 limit,
 		filters:               requestFilters,
 	}
 }
@@ -90,6 +95,7 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 	columns := make(map[string]struct{})
 	projectionColumns := make(map[string]struct{})
 	filterColumns := make(map[string]struct{})
+	var limit int64
 	for _, expr := range keys {
 		collectExprColumns(expr.node, columns)
 		collectExprColumns(expr.node, projectionColumns)
@@ -109,6 +115,9 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 				filters = append(filters, filter)
 			}
 		case planLimit:
+			if node.limit > 0 && (limit == 0 || node.limit < limit) {
+				limit = node.limit
+			}
 		default:
 			return scanRequest{}
 		}
@@ -125,6 +134,7 @@ func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {
 		columns:           result,
 		projectionColumns: sortedColumnNames(projectionColumns),
 		filterOnlyColumns: filterOnlyColumnNames(filterColumns, projectionColumns),
+		limit:             limit,
 		filters:           filters,
 	}
 }

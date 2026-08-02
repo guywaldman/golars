@@ -25,6 +25,7 @@ type Config struct {
 	Allocator     memory.Allocator
 	BatchSize     int64
 	Parallel      bool
+	Parallelism   int
 	MissingColumn MissingColumnError
 }
 
@@ -34,6 +35,7 @@ type Request struct {
 	ProjectionColumns     []string
 	FilterOnlyColumns     []string
 	ProjectionOnlyBatches bool
+	Limit                 int64
 	Filters               []Predicate
 	SelectionApplicable   bool
 }
