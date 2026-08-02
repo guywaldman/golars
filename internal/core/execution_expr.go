@@ -87,6 +87,9 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 			args[1].Release()
 			args[0], args[1] = left, right
 		}
+		if node.name == "modulo" {
+			return evalModuloArrays(args[0], args[1], engine.allocator)
+		}
 		if node.name == "coalesce" {
 			return coalesceArrays(args[0], args[1], engine.allocator)
 		}
@@ -127,7 +130,7 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 func coercibleCall(name string) bool {
 	switch name {
 	case "equal", "not_equal", "greater", "greater_equal", "less", "less_equal",
-		"add", "subtract", "multiply", "divide", "coalesce":
+		"add", "subtract", "multiply", "divide", "modulo", "coalesce":
 		return true
 	default:
 		return false
@@ -381,6 +384,152 @@ func evalTemporalCall(name string, args []arrow.Array, mem *quotaAllocator) (arr
 		}
 	}
 	return builder.NewInt32Array(), nil
+}
+
+func evalModuloArrays(left, right arrow.Array, mem *quotaAllocator) (arrow.Array, error) {
+	if left == nil || right == nil || left.Len() != right.Len() {
+		return nil, fmt.Errorf("%w: modulo inputs must have equal lengths", ErrTypeMismatch)
+	}
+	if !isModuloType(left.DataType().ID()) || !arrow.TypeEqual(left.DataType(), right.DataType()) {
+		return nil, fmt.Errorf("%w: modulo requires equally typed numeric operands", ErrTypeMismatch)
+	}
+	builder := array.NewBuilder(mem, left.DataType())
+	defer builder.Release()
+	for row := 0; row < left.Len(); row++ {
+		if !left.IsValid(row) || !right.IsValid(row) {
+			builder.AppendNull()
+			continue
+		}
+		leftValue, err := scalar.GetScalar(left, row)
+		if err != nil {
+			return nil, err
+		}
+		rightValue, err := scalar.GetScalar(right, row)
+		if err != nil {
+			return nil, err
+		}
+		result, err := moduloScalar(leftValue, rightValue)
+		if err != nil {
+			return nil, err
+		}
+		if err := scalar.Append(builder, result); err != nil {
+			return nil, err
+		}
+	}
+	return builder.NewArray(), nil
+}
+
+func isModuloType(id arrow.Type) bool {
+	return arrow.IsInteger(id) || arrow.IsFloating(id)
+}
+
+func moduloScalar(left, right scalar.Scalar) (scalar.Scalar, error) {
+	zero := func() (scalar.Scalar, error) {
+		return nil, fmt.Errorf("golars: modulo by zero")
+	}
+	switch left := left.(type) {
+	case *scalar.Int8:
+		right, ok := right.(*scalar.Int8)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewInt8Scalar(left.Value % right.Value), nil
+	case *scalar.Int16:
+		right, ok := right.(*scalar.Int16)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewInt16Scalar(left.Value % right.Value), nil
+	case *scalar.Int32:
+		right, ok := right.(*scalar.Int32)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewInt32Scalar(left.Value % right.Value), nil
+	case *scalar.Int64:
+		right, ok := right.(*scalar.Int64)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewInt64Scalar(left.Value % right.Value), nil
+	case *scalar.Uint8:
+		right, ok := right.(*scalar.Uint8)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewUint8Scalar(left.Value % right.Value), nil
+	case *scalar.Uint16:
+		right, ok := right.(*scalar.Uint16)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewUint16Scalar(left.Value % right.Value), nil
+	case *scalar.Uint32:
+		right, ok := right.(*scalar.Uint32)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewUint32Scalar(left.Value % right.Value), nil
+	case *scalar.Uint64:
+		right, ok := right.(*scalar.Uint64)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewUint64Scalar(left.Value % right.Value), nil
+	case *scalar.Float16:
+		right, ok := right.(*scalar.Float16)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value.Float32() == 0 {
+			return zero()
+		}
+		return scalar.NewFloat16ScalarFromFloat32(float32(math.Mod(float64(left.Value.Float32()), float64(right.Value.Float32())))), nil
+	case *scalar.Float32:
+		right, ok := right.(*scalar.Float32)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewFloat32Scalar(float32(math.Mod(float64(left.Value), float64(right.Value)))), nil
+	case *scalar.Float64:
+		right, ok := right.(*scalar.Float64)
+		if !ok {
+			return nil, fmt.Errorf("%w: modulo operands have different types", ErrTypeMismatch)
+		}
+		if right.Value == 0 {
+			return zero()
+		}
+		return scalar.NewFloat64Scalar(math.Mod(left.Value, right.Value)), nil
+	default:
+		return nil, fmt.Errorf("%w: modulo is unsupported for %s", ErrTypeMismatch, left.DataType())
+	}
 }
 
 func literalArray(value any, length int64, mem *quotaAllocator) (arrow.Array, error) {

@@ -197,6 +197,11 @@ func marshalNativeExpr(node *exprNode) (nativeExpr, bool, error) {
 			result.Args = []nativeExpr{arg}
 		}
 	case exprCall:
+		// The portable executor owns modulo semantics until the bundled native
+		// backend exposes the same operation.
+		if node.name == "modulo" {
+			return nativeExpr{}, false, nil
+		}
 		result.Kind = "call"
 		result.Name = node.name
 		args, ok, err := marshalNativeExprNodes(node.args)

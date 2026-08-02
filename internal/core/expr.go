@@ -51,6 +51,7 @@ func (e Expr) Add(rhs Expr) Expr        { return e.binary("add", rhs) }
 func (e Expr) Sub(rhs Expr) Expr        { return e.binary("subtract", rhs) }
 func (e Expr) Mul(rhs Expr) Expr        { return e.binary("multiply", rhs) }
 func (e Expr) Div(rhs Expr) Expr        { return e.binary("divide", rhs) }
+func (e Expr) Mod(rhs Expr) Expr        { return e.binary("modulo", rhs) }
 func (e Expr) And(rhs Expr) Expr        { return e.binary("and_kleene", rhs) }
 func (e Expr) Or(rhs Expr) Expr         { return e.binary("or_kleene", rhs) }
 func (e Expr) Not() Expr                { return e.unary("invert") }

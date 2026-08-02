@@ -29,7 +29,7 @@ one branch does not invalidate another.
 - Eager and lazy `Select`, `Filter`, `WithColumns`, `Limit`/`Head`, `Sort`,
   `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,
   `Unnest`, `Drop`, `Rename`, and `DropNulls`.
-- Expression trees with arithmetic, comparisons, boolean logic, null handling,
+- Expression trees with arithmetic (including modulo), comparisons, boolean logic, null handling,
   casts, aggregates, conditional expressions, partitioned windows, descending
   sort, membership/range predicates, and common string/date kernels.
 - Arrow type descriptors cover primitive, temporal, decimal, dictionary
