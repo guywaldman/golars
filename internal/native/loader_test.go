@@ -8,7 +8,9 @@ import (
 
 func TestEmbeddedRuntime(t *testing.T) {
 	nativeRuntime, err := Open()
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+	supported := (runtime.GOOS == "darwin" && runtime.GOARCH == "arm64") ||
+		(runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"))
+	if !supported {
 		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("Open() error = %v, want ErrUnavailable on unsupported target", err)
 		}

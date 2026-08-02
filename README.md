@@ -56,7 +56,9 @@ CGO-free FFI; consumers only need the normal `go get` and Go build workflow.
 No Rust toolchain, C compiler, shared-library installation, environment
 variables, or companion executable is required. Unsupported targets and plans
 use the portable Go executor automatically. Applications can force the Go
-executor with `WithNativeBackend(false)`.
+executor with `WithNativeBackend(false)`. Embedded native assets currently cover
+macOS arm64 and Linux amd64/arm64; all other targets remain fully functional
+through the portable executor and are cross-compiled in CI.
 
 ## Query planning and storage
 

@@ -92,13 +92,20 @@ func (a *quotaAllocator) Allocate(size int) []byte {
 	return a.base.Allocate(size)
 }
 func (a *quotaAllocator) Reallocate(size int, b []byte) []byte {
-	delta := int64(size - cap(b))
+	oldCapacity := cap(b)
+	delta := int64(size - oldCapacity)
 	if delta > 0 {
 		a.reserve(delta)
 	} else if delta < 0 {
 		a.used.Add(delta)
 	}
-	return a.base.Reallocate(size, b)
+	result := a.base.Reallocate(size, b)
+	if size <= cap(result) {
+		// Arrow's Go allocator keeps the old capacity when shrinking. Cap the
+		// returned slice so Free observes the same size that was accounted for.
+		result = result[:size:size]
+	}
+	return result
 }
 func (a *quotaAllocator) Free(b []byte) {
 	a.used.Add(-int64(cap(b)))
