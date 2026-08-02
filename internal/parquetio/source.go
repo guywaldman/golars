@@ -21,11 +21,7 @@ func OpenFile(ctx context.Context, path string, config Config, request Request) 
 	if err != nil {
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{
-		BatchSize:          config.BatchSize,
-		Parallel:           config.Parallel,
-		PreAllocBinaryData: true,
-	}
+	props := parquetArrowReadProperties(config)
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -47,11 +43,7 @@ func OpenReader(ctx context.Context, file io.ReadCloser, config Config, request 
 		_ = file.Close()
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{
-		BatchSize:          config.BatchSize,
-		Parallel:           config.Parallel,
-		PreAllocBinaryData: true,
-	}
+	props := parquetArrowReadProperties(config)
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -77,11 +69,7 @@ func OpenRanged(ctx context.Context, store storage.RangeObjectStore, path string
 		_ = ranged.Close()
 		return nil, err
 	}
-	props := pqarrow.ArrowReadProperties{
-		BatchSize:          config.BatchSize,
-		Parallel:           config.Parallel,
-		PreAllocBinaryData: true,
-	}
+	props := parquetArrowReadProperties(config)
 	arrowReader, err := pqarrow.NewFileReader(reader, props, config.Allocator)
 	if err != nil {
 		_ = reader.Close()
@@ -89,6 +77,16 @@ func OpenRanged(ctx context.Context, store storage.RangeObjectStore, path string
 		return nil, err
 	}
 	return openParquetReader(ctx, config, reader, arrowReader, request, false, ranged)
+}
+
+func parquetArrowReadProperties(config Config) pqarrow.ArrowReadProperties {
+	// Metadata-based binary preallocation over-reserves this workload and adds
+	// more copying than it saves while the builders grow their actual payloads.
+	return pqarrow.ArrowReadProperties{
+		BatchSize:          config.BatchSize,
+		Parallel:           config.Parallel,
+		PreAllocBinaryData: false,
+	}
 }
 
 func openLocalParquetFile(path string, allocator memory.Allocator) (*parquetfile.Reader, error) {

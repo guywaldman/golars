@@ -59,6 +59,11 @@ func (lf *LazyFrame) executeBatches(ctx context.Context, callback func(arrow.Rec
 }
 
 func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request *scanRequest, callback func(arrow.RecordBatch) error) error {
+	// Source reads already fan out across row groups. Keeping Arrow kernels
+	// single-threaded avoids nested column-level goroutines for each batch.
+	execCtx := compute.DefaultExecCtx()
+	execCtx.NumParallel = 1
+	ctx = compute.SetExecCtx(ctx, execCtx)
 	nodes := make([]*planNode, 0, 8)
 	plan := optimizePlan(lf.plan)
 	for node := plan; node != nil; node = node.input {
