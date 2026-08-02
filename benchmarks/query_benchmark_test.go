@@ -96,6 +96,10 @@ func BenchmarkFullAggregation(b *testing.B) {
 	benchmarkQuery(b, FullAggregation)
 }
 
+func BenchmarkJSONDecode(b *testing.B) {
+	benchmarkQuery(b, JSONDecode)
+}
+
 func benchmarkQuery(b *testing.B, query Query) {
 	path := *benchmarkDataset
 	if path == "" {

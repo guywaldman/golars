@@ -49,6 +49,9 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 - [X] Expression trees with arithmetic (including modulo), comparisons, boolean logic, null handling,
   casts, aggregates, conditional expressions, partitioned windows, descending
   sort, membership/range predicates, and common string/date kernels.
+- [X] Native JSON-column decoding into typed structs and lists, with SIMD parsing,
+  row-level nulling for malformed JSON, field-level nulling for bad leaves,
+  coercion controls, and strict required-field validation.
 - [X] Arrow type descriptors - primitive, temporal, decimal, dictionary
   (categorical/enum), nested list/struct/map, fixed-size, view, interval, and
   run-end encoded types. `DataFrame`/`Series` constructors accept Arrow arrays,
@@ -88,6 +91,28 @@ Similar to Polars:
   and predicate pushdown, limit pushdown, type coercion, and physical planning.
   `ExplainUnoptimized` and `ExplainOptimized` describe the Go-facing plan; the
   native optimizer is applied during collection.
+
+## Typed JSON columns
+
+`DecodeJSON` turns a string expression into a typed Arrow value. Define the
+target with the same descriptors used for DataFrame columns; nested structs and
+lists are supported.
+
+```go
+schema := gl.StructOf(
+	gl.Field{Name: "id", Type: gl.Int64, Nullable: false},
+	gl.Field{Name: "tenant", Type: gl.String, Nullable: true},
+	gl.Field{Name: "tags", Type: gl.ListOf(gl.String), Nullable: true},
+)
+
+decoded := gl.DecodeJSON(gl.Col("payload_json"), schema)
+result, err := lf.Select(decoded.Alias("payload")).Collect(ctx)
+```
+
+Rows with malformed JSON or incompatible leaves become null by default, while
+valid sibling fields are retained. Use `WithJSONCoerce(false)` for strict JSON
+types, `WithJSONErrorMode(JSONErrorOnError)` to fail the query, or
+`WithJSONStrictRequiredFields(true)` to enforce non-nullable struct fields.
 
 ## Examples
 
@@ -184,6 +209,7 @@ For the 1M-row dataset, the complete workload set was:
 | `self_join` | 3.457 | 3.102 | 1.11x | 10,482 | 31.5 MiB | 125,008 |
 | `unique_tenant` | 4.404 | 4.757 | 0.93x | 3,421 | 20.8 MiB | 32 |
 | `full_aggregation` | 5.106 | 5.341 | 0.96x | 4,330 | 19.6 MiB | 32 |
+| `json_decode` | 41.711 | 52.246 | 0.80x | 5,728 | 157.9 MiB | 1,000,000 |
 
 Go's `B/op` is the allocation metric reported by `go test`; the Polars column
 is the process RSS increase reported by the Rust runner, so those two memory

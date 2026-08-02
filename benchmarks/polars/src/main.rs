@@ -3,6 +3,7 @@ use std::ops::Mul;
 use std::time::Instant;
 
 use polars::prelude::*;
+use polars_json::ndjson::deserialize::deserialize_iter;
 
 #[derive(Clone, Copy)]
 enum Query {
@@ -19,6 +20,7 @@ enum Query {
     SelfJoin,
     UniqueTenant,
     FullAggregation,
+    JSONDecode,
 }
 
 impl Query {
@@ -37,6 +39,7 @@ impl Query {
             "self_join" => Ok(Self::SelfJoin),
             "unique_tenant" => Ok(Self::UniqueTenant),
             "full_aggregation" => Ok(Self::FullAggregation),
+            "json_decode" => Ok(Self::JSONDecode),
             _ => Err(format!("unknown query {value:?}")),
         }
     }
@@ -56,6 +59,7 @@ impl Query {
             Self::SelfJoin => "self_join",
             Self::UniqueTenant => "unique_tenant",
             Self::FullAggregation => "full_aggregation",
+            Self::JSONDecode => "json_decode",
         }
     }
 }
@@ -148,7 +152,39 @@ fn execute(path: &str, query: Query, cutoff: i64) -> PolarsResult<DataFrame> {
                 col("value").count().alias("value_count"),
             ])
             .collect(),
+        Query::JSONDecode => {
+            let schema = DataType::Struct(vec![
+                Field::new("id".into(), DataType::Int64),
+                Field::new("tenant".into(), DataType::String),
+                Field::new("amount".into(), DataType::Float64),
+                Field::new("tags".into(), DataType::List(DataType::Int64.boxed())),
+            ]);
+            scan(path)?
+                .select([json_decode_expr(col("json_payload"), schema)?.alias("decoded")])
+                .collect()
+        }
     }
+}
+
+fn json_decode_expr(input: Expr, schema: DataType) -> PolarsResult<Expr> {
+    let output_dtype = schema.clone();
+    Ok(input.map(
+        move |column| {
+            let series = column.as_materialized_series();
+            let strings = series.str()?;
+            let rows: Vec<&str> = strings.iter().map(|row| row.unwrap_or("null")).collect();
+            let buffer_size: usize = rows.iter().map(|row| row.len()).sum();
+            let array = deserialize_iter(
+                rows.iter().copied(),
+                schema.to_arrow(CompatLevel::newest()),
+                buffer_size,
+                rows.len(),
+                true,
+            )?;
+            Ok(Series::try_from((series.name().clone(), array))?.into_column())
+        },
+        move |_, field| Ok(Field::new(field.name().clone(), output_dtype.clone())),
+    ))
 }
 
 fn max_rss_bytes() -> u64 {

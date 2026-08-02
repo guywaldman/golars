@@ -102,6 +102,7 @@ jobs:
             self_join
             unique_tenant
             full_aggregation
+            json_decode
           )
           for query in "${queries[@]}"; do
             /tmp/golars-benchmark \

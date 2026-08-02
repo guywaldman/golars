@@ -32,6 +32,7 @@ queries=(
 	self_join
 	unique_tenant
 	full_aggregation
+	json_decode
 )
 
 echo "benchmark results: $result_dir"

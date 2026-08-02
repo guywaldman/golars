@@ -23,6 +23,7 @@ type exprNode struct {
 	args       []*exprNode
 	windowKeys []*exprNode
 	dtype      DataType
+	jsonDecode *jsonDecodeConfig
 	distinct   bool
 	descending bool
 }

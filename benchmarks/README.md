@@ -83,3 +83,12 @@ the canonical result shapes and representative values for every workload.
 
 The Rust baseline is pinned by `benchmarks/polars/Cargo.lock`; update it
 deliberately when changing the comparison version.
+
+## Typed JSON benchmark
+
+`json_decode` adds a deterministic JSON string column to the benchmark Parquet
+input and decodes it into a nested struct/list schema. The Go path uses the
+same SIMD JSON/Arrow deserializer as the Rust baseline, with the Go plan and FFI
+boundary included in the measurement. The 1M-row run documented in the root
+README used one warmup and three measured executions; it measured 41.711 ms/op
+for golars versus 52.246 ms/op for the direct Rust baseline.

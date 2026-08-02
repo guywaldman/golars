@@ -782,6 +782,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "polars",
+ "polars-json",
  "serde",
  "serde_json",
 ]

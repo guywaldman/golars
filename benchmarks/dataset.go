@@ -32,13 +32,14 @@ const (
 	SelfJoin           Query = "self_join"
 	UniqueTenant       Query = "unique_tenant"
 	FullAggregation    Query = "full_aggregation"
+	JSONDecode         Query = "json_decode"
 )
 
 func (q Query) Valid() bool {
 	switch q {
 	case ProjectionOnly, FilterSelect, CompoundFilter, DerivedProjection,
 		GroupedAggregation, MultiAggregation, StringFilter, LimitPushdown,
-		SortedTopK, WindowAggregation, SelfJoin, UniqueTenant, FullAggregation:
+		SortedTopK, WindowAggregation, SelfJoin, UniqueTenant, FullAggregation, JSONDecode:
 		return true
 	default:
 		return false
@@ -62,6 +63,7 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 	eventDayBuilder := array.NewInt64Builder(mem)
 	tenantBuilder := array.NewStringBuilder(mem)
 	textBuilder := array.NewStringBuilder(mem)
+	jsonBuilder := array.NewStringBuilder(mem)
 	defer func() {
 		idBuilder.Release()
 		groupBuilder.Release()
@@ -70,6 +72,7 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 		eventDayBuilder.Release()
 		tenantBuilder.Release()
 		textBuilder.Release()
+		jsonBuilder.Release()
 	}()
 	tenants := make([]string, 32)
 	for i := range tenants {
@@ -83,6 +86,14 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 		eventDayBuilder.Append(i / 1_000)
 		tenantBuilder.Append(tenants[i%int64(len(tenants))])
 		textBuilder.Append(fmt.Sprintf("payload-%04d", i%10_000))
+		jsonBuilder.Append(fmt.Sprintf(
+			`{"id":%d,"tenant":"%s","amount":%.1f,"tags":[%d,%d]}`,
+			i,
+			tenants[i%int64(len(tenants))],
+			float64(i%10_000)/10,
+			i%8,
+			(i+1)%8,
+		))
 	}
 	id := idBuilder.NewInt64Array()
 	groupID := groupBuilder.NewInt64Array()
@@ -91,6 +102,7 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 	eventDay := eventDayBuilder.NewInt64Array()
 	tenant := tenantBuilder.NewStringArray()
 	text := textBuilder.NewStringArray()
+	jsonPayload := jsonBuilder.NewStringArray()
 	defer id.Release()
 	defer groupID.Release()
 	defer value.Release()
@@ -98,6 +110,7 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 	defer eventDay.Release()
 	defer tenant.Release()
 	defer text.Release()
+	defer jsonPayload.Release()
 
 	idSeries, err := golars.NewSeriesFromArrow("id", id)
 	if err != nil {
@@ -134,7 +147,12 @@ func WriteDataset(path string, rows, rowGroupSize int64) error {
 		return err
 	}
 	defer textSeries.Close()
-	df, err := golars.NewDataFrame(idSeries, groupSeries, valueSeries, quantitySeries, eventDaySeries, tenantSeries, textSeries)
+	jsonSeries, err := golars.NewSeriesFromArrow("json_payload", jsonPayload)
+	if err != nil {
+		return err
+	}
+	defer jsonSeries.Close()
+	df, err := golars.NewDataFrame(idSeries, groupSeries, valueSeries, quantitySeries, eventDaySeries, tenantSeries, textSeries, jsonSeries)
 	if err != nil {
 		return err
 	}
@@ -232,6 +250,15 @@ func Execute(ctx context.Context, engine *golars.Engine, path string, query Quer
 				golars.Col("value").Mean().Alias("value_mean"),
 				golars.Col("value").Count().Alias("value_count"),
 			))
+	case JSONDecode:
+		schema := golars.StructOf(
+			golars.Field{Name: "id", Type: golars.Int64, Nullable: false},
+			golars.Field{Name: "tenant", Type: golars.String, Nullable: false},
+			golars.Field{Name: "amount", Type: golars.Float64, Nullable: false},
+			golars.Field{Name: "tags", Type: golars.ListOf(golars.Int64), Nullable: false},
+		)
+		return collect(ctx, engine.ScanParquet(path).
+			Select(golars.DecodeJSON(golars.Col("json_payload"), schema).Alias("decoded")))
 	}
 	return nil, fmt.Errorf("benchmarks: unknown query %q", query)
 }

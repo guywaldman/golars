@@ -2,8 +2,9 @@ use std::{fs::File, io::Cursor, panic, slice};
 
 use base64::Engine as _;
 use polars::prelude::*;
+use polars_json::ndjson::deserialize::deserialize_iter;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Number, Value};
 
 const ABI_VERSION: u32 = 1;
 
@@ -175,7 +176,46 @@ struct QueryExpr {
     #[serde(default)]
     dtype: String,
     #[serde(default)]
+    json_decode: Option<JsonDecodeOptions>,
+    #[serde(default)]
     descending: bool,
+}
+
+#[derive(Clone, Deserialize)]
+struct JsonDecodeOptions {
+    schema: JsonType,
+    #[serde(default)]
+    on_error: String,
+    #[serde(default = "default_json_coerce")]
+    coerce: bool,
+    #[serde(default)]
+    strict_required_fields: bool,
+}
+
+#[derive(Clone, Deserialize)]
+struct JsonField {
+    name: String,
+    #[serde(rename = "type")]
+    dtype: JsonType,
+    #[serde(default)]
+    nullable: bool,
+}
+
+#[derive(Clone, Deserialize)]
+struct JsonType {
+    kind: String,
+    #[serde(default)]
+    elem: Option<Box<JsonType>>,
+    #[serde(default)]
+    fields: Vec<JsonField>,
+    #[serde(default)]
+    unit: String,
+    #[serde(default)]
+    timezone: String,
+}
+
+fn default_json_coerce() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -514,6 +554,13 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         return Ok(all().as_expr());
     }
     match expression.name.as_str() {
+        "json_decode" => {
+            let options = expression
+                .json_decode
+                .as_ref()
+                .ok_or_else(|| "native JSON decode options are missing".to_owned())?;
+            json_decode_expr(one_arg(expression)?, options)
+        }
         "equal" => {
             let (left, right) = two_args(expression)?;
             Ok(left.eq(right))
@@ -639,6 +686,408 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         "is_infinite" => Ok(one_arg(expression)?.is_infinite()),
         name => Err(format!("unsupported native call {name:?}")),
     }
+}
+
+fn json_decode_expr(input: Expr, options: &JsonDecodeOptions) -> Result<Expr, String> {
+    let dtype = json_dtype(&options.schema)?;
+    let output_dtype = dtype.clone();
+    let options = options.clone();
+    Ok(input.map(
+        move |column| decode_json_column(column, dtype.clone(), options.clone()),
+        move |_, field| Ok(Field::new(field.name().clone(), output_dtype.clone())),
+    ))
+}
+
+fn json_dtype(schema: &JsonType) -> Result<DataType, String> {
+    match schema.kind.as_str() {
+        "null" => Ok(DataType::Null),
+        "bool" => Ok(DataType::Boolean),
+        "int8" => Ok(DataType::Int8),
+        "int16" => Ok(DataType::Int16),
+        "int32" => Ok(DataType::Int32),
+        "int64" => Ok(DataType::Int64),
+        "uint8" => Ok(DataType::UInt8),
+        "uint16" => Ok(DataType::UInt16),
+        "uint32" => Ok(DataType::UInt32),
+        "uint64" => Ok(DataType::UInt64),
+        "float32" => Ok(DataType::Float32),
+        "float64" => Ok(DataType::Float64),
+        "string" | "large_string" => Ok(DataType::String),
+        "binary" | "large_binary" => Ok(DataType::Binary),
+        "date32" | "date64" => Ok(DataType::Date),
+        "timestamp" => {
+            let timezone = if schema.timezone.is_empty() {
+                None
+            } else {
+                TimeZone::opt_try_new(Some(schema.timezone.clone()))
+                    .map_err(|error| error.to_string())?
+            };
+            Ok(DataType::Datetime(json_time_unit(&schema.unit)?, timezone))
+        }
+        "duration" => Ok(DataType::Duration(json_time_unit(&schema.unit)?)),
+        "list" => Ok(DataType::List(
+            json_dtype(
+                schema
+                    .elem
+                    .as_deref()
+                    .ok_or_else(|| "JSON list schema is missing its element type".to_owned())?,
+            )?
+            .boxed(),
+        )),
+        "struct" => Ok(DataType::Struct(
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    Ok(Field::new(
+                        field.name.clone().into(),
+                        json_dtype(&field.dtype)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        kind => Err(format!("unsupported JSON decode schema kind {kind:?}")),
+    }
+}
+
+fn json_time_unit(unit: &str) -> Result<TimeUnit, String> {
+    match unit {
+        // Polars stores temporal values at millisecond precision or finer.
+        // A seconds schema is represented at millisecond precision by the
+        // native execution layer.
+        "s" => Ok(TimeUnit::Milliseconds),
+        "ms" => Ok(TimeUnit::Milliseconds),
+        "us" => Ok(TimeUnit::Microseconds),
+        "ns" | "" => Ok(TimeUnit::Nanoseconds),
+        other => Err(format!("unsupported JSON time unit {other:?}")),
+    }
+}
+
+fn decode_json_column(
+    column: Column,
+    dtype: DataType,
+    options: JsonDecodeOptions,
+) -> PolarsResult<Column> {
+    let series = column.as_materialized_series();
+    let strings = series.str()?;
+    let rows: Vec<&str> = strings.iter().map(|row| row.unwrap_or("null")).collect();
+    let arrow_dtype = dtype.to_arrow(CompatLevel::newest());
+    let buffer_size: usize = rows.iter().map(|row| row.len()).sum();
+
+    let mut normalized = None;
+    if options.strict_required_fields || !options.coerce {
+        normalized = Some(normalize_json_rows(&rows, &options.schema, &options)?);
+    }
+    let input_rows = normalized
+        .as_ref()
+        .map(|rows| rows.iter().map(String::as_str).collect::<Vec<_>>());
+    let fast_rows = input_rows.as_deref().unwrap_or(&rows);
+    let fast_buffer_size = input_rows
+        .as_ref()
+        .map(|rows| rows.iter().map(|row| row.len()).sum())
+        .unwrap_or(buffer_size);
+
+    match deserialize_iter(
+        fast_rows.iter().copied(),
+        arrow_dtype.clone(),
+        fast_buffer_size,
+        fast_rows.len(),
+        true,
+    ) {
+        Ok(array) => Ok(Series::try_from((series.name().clone(), array))?.into_column()),
+        Err(_error) => {
+            let normalized = normalize_parse_errors(
+                fast_rows,
+                &arrow_dtype,
+                fast_buffer_size,
+                &options.schema,
+                &options,
+            )?;
+            let array = deserialize_iter(
+                normalized.iter().map(String::as_str),
+                arrow_dtype,
+                normalized.iter().map(String::len).sum(),
+                normalized.len(),
+                true,
+            )?;
+            Ok(Series::try_from((series.name().clone(), array))?.into_column())
+        }
+    }
+}
+
+fn normalize_parse_errors(
+    rows: &[&str],
+    dtype: &polars::prelude::ArrowDataType,
+    buffer_size: usize,
+    schema: &JsonType,
+    options: &JsonDecodeOptions,
+) -> PolarsResult<Vec<String>> {
+    let mut normalized = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        match deserialize_iter(
+            std::iter::once(*row),
+            dtype.clone(),
+            buffer_size.min(row.len()),
+            1,
+            true,
+        ) {
+            Ok(_) => normalized.push((*row).to_owned()),
+            Err(error) => {
+                let replacement = match normalize_json_row(row, schema, options) {
+                    Ok(Some(value)) => {
+                        let value_buffer = value.len();
+                        match deserialize_iter(
+                            std::iter::once(value.as_str()),
+                            dtype.clone(),
+                            value_buffer,
+                            1,
+                            true,
+                        ) {
+                            Ok(_) => value,
+                            Err(error) if options.on_error == "error" => {
+                                return Err(
+                                    polars_err!(ComputeError: "JSON decode failed at row {}: {}", index, error),
+                                );
+                            }
+                            Err(_) => "null".to_owned(),
+                        }
+                    }
+                    Ok(None) if options.on_error == "error" => {
+                        return Err(
+                            polars_err!(ComputeError: "JSON decode failed at row {}: {}", index, error),
+                        );
+                    }
+                    Ok(None) => "null".to_owned(),
+                    Err(message) if options.on_error == "error" => {
+                        return Err(
+                            polars_err!(ComputeError: "JSON decode failed at row {}: {}", index, message),
+                        );
+                    }
+                    Err(_) => "null".to_owned(),
+                };
+                normalized.push(replacement)
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn normalize_json_rows(
+    rows: &[&str],
+    schema: &JsonType,
+    options: &JsonDecodeOptions,
+) -> PolarsResult<Vec<String>> {
+    let mut normalized = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        match normalize_json_row(row, schema, options) {
+            Ok(Some(value)) => normalized.push(value),
+            Ok(None) if options.on_error != "error" => normalized.push("null".to_owned()),
+            Ok(None) => {
+                return Err(
+                    polars_err!(ComputeError: "JSON decode failed at row {}: top-level value does not match the schema", index),
+                );
+            }
+            Err(_message) if options.on_error != "error" => normalized.push("null".to_owned()),
+            Err(message) => {
+                return Err(
+                    polars_err!(ComputeError: "JSON decode failed at row {}: {}", index, message),
+                );
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn normalize_json_row(
+    row: &str,
+    schema: &JsonType,
+    options: &JsonDecodeOptions,
+) -> Result<Option<String>, String> {
+    let value: Value = serde_json::from_str(row).map_err(|error| error.to_string())?;
+    let Some(value) = normalize_json_value(
+        &value,
+        schema,
+        options.coerce,
+        options.strict_required_fields,
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn normalize_json_value(
+    value: &Value,
+    schema: &JsonType,
+    coerce: bool,
+    strict_required: bool,
+    nullable: bool,
+) -> Result<Option<Value>, String> {
+    if value.is_null() {
+        return if nullable || !strict_required {
+            Ok(Some(Value::Null))
+        } else {
+            Err("required value is null".to_owned())
+        };
+    }
+    match schema.kind.as_str() {
+        "struct" => {
+            let Some(object) = value.as_object() else {
+                return if nullable || !strict_required {
+                    Ok(None)
+                } else {
+                    Err("required value is not an object".to_owned())
+                };
+            };
+            let mut output = Map::with_capacity(schema.fields.len());
+            for field in &schema.fields {
+                match object.get(&field.name) {
+                    Some(value) => match normalize_json_value(
+                        value,
+                        &field.dtype,
+                        coerce,
+                        strict_required,
+                        field.nullable,
+                    )? {
+                        Some(value) => {
+                            output.insert(field.name.clone(), value);
+                        }
+                        None if strict_required && !field.nullable => {
+                            return Err(format!("required field {:?} is invalid", field.name));
+                        }
+                        None => {
+                            output.insert(field.name.clone(), Value::Null);
+                        }
+                    },
+                    None if strict_required && !field.nullable => {
+                        return Err(format!("required field {:?} is missing", field.name));
+                    }
+                    None => {}
+                }
+            }
+            Ok(Some(Value::Object(output)))
+        }
+        "list" => {
+            let Some(values) = value.as_array() else {
+                return if nullable || !strict_required {
+                    Ok(None)
+                } else {
+                    Err("required value is not an array".to_owned())
+                };
+            };
+            let element = schema
+                .elem
+                .as_deref()
+                .ok_or_else(|| "JSON list schema is missing its element type".to_owned())?;
+            let mut output = Vec::with_capacity(values.len());
+            for value in values {
+                match normalize_json_value(value, element, coerce, strict_required, true)? {
+                    Some(value) => output.push(value),
+                    None => output.push(Value::Null),
+                }
+            }
+            Ok(Some(Value::Array(output)))
+        }
+        _ => match coerce_scalar(value, schema, coerce) {
+            Some(value) => Ok(Some(value)),
+            None if nullable || !strict_required => Ok(None),
+            None => Err(format!("required value does not match {}", schema.kind)),
+        },
+    }
+}
+
+fn coerce_scalar(value: &Value, schema: &JsonType, coerce: bool) -> Option<Value> {
+    match schema.kind.as_str() {
+        "bool" => {
+            if let Some(value) = value.as_bool() {
+                Some(Value::Bool(value))
+            } else if coerce {
+                value
+                    .as_str()
+                    .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                        "true" => Some(Value::Bool(true)),
+                        "false" => Some(Value::Bool(false)),
+                        _ => None,
+                    })
+            } else {
+                None
+            }
+        }
+        "int8" | "int16" | "int32" | "int64" => json_integer(value, coerce).and_then(|value| {
+            let valid = match schema.kind.as_str() {
+                "int8" => i8::try_from(value).is_ok(),
+                "int16" => i16::try_from(value).is_ok(),
+                "int32" => i32::try_from(value).is_ok(),
+                _ => i64::try_from(value).is_ok(),
+            };
+            valid.then(|| Value::Number(Number::from(value as i64)))
+        }),
+        "uint8" | "uint16" | "uint32" | "uint64" => json_integer(value, coerce).and_then(|value| {
+            let valid = value >= 0
+                && match schema.kind.as_str() {
+                    "uint8" => u8::try_from(value).is_ok(),
+                    "uint16" => u16::try_from(value).is_ok(),
+                    "uint32" => u32::try_from(value).is_ok(),
+                    _ => u64::try_from(value).is_ok(),
+                };
+            valid.then(|| Value::Number(Number::from(value as u64)))
+        }),
+        "float32" | "float64" => json_float(value, coerce)
+            .and_then(Number::from_f64)
+            .map(Value::Number),
+        "string" | "large_string" => match value {
+            Value::String(value) => Some(Value::String(value.clone())),
+            _ if coerce => Some(Value::String(value.to_string())),
+            _ => None,
+        },
+        "binary" | "large_binary" => value.as_str().map(|value| Value::String(value.to_owned())),
+        "date32" | "date64" | "timestamp" => value
+            .as_str()
+            .map(|value| Value::String(value.to_owned()))
+            .or_else(|| coerce.then(|| value.clone()).filter(Value::is_number)),
+        "duration" => json_integer(value, coerce)
+            .and_then(|value| i64::try_from(value).ok())
+            .map(|value| Value::Number(Number::from(value))),
+        "null" if value.is_null() => Some(Value::Null),
+        _ => None,
+    }
+}
+
+fn json_integer(value: &Value, coerce: bool) -> Option<i128> {
+    if let Some(value) = value.as_i64() {
+        return Some(value as i128);
+    }
+    if let Some(value) = value.as_u64() {
+        return Some(value as i128);
+    }
+    if coerce {
+        if let Some(value) = value.as_f64() {
+            if value.is_finite() && value.fract() == 0.0 {
+                return Some(value as i128);
+            }
+        }
+        if let Some(value) = value.as_str() {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+fn json_float(value: &Value, coerce: bool) -> Option<f64> {
+    if let Some(number) = value.as_number() {
+        if number.is_f64() {
+            return number.as_f64();
+        }
+        if coerce {
+            return number.as_f64();
+        }
+    }
+    coerce
+        .then(|| value.as_str()?.trim().parse().ok())
+        .flatten()
 }
 
 fn to_join_type(name: &str) -> Result<JoinType, String> {

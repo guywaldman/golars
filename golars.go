@@ -125,6 +125,10 @@ type (
 	DtExpr = core.DtExpr
 	// WhenThen builds a conditional expression.
 	WhenThen = core.WhenThen
+	// JSONErrorMode controls how invalid JSON rows are handled.
+	JSONErrorMode = core.JSONErrorMode
+	// JSONDecodeOption configures DecodeJSON.
+	JSONDecodeOption = core.JSONDecodeOption
 	// JoinType selects the join operation.
 	JoinType = core.JoinType
 	// JoinOption configures a join.
@@ -155,6 +159,13 @@ type (
 	MemoryLimitError = core.MemoryLimitError
 	// ColumnNotFoundError reports an unknown column name.
 	ColumnNotFoundError = core.ColumnNotFoundError
+)
+
+const (
+	// JSONNullOnError replaces malformed or incompatible rows with null.
+	JSONNullOnError = core.JSONNullOnError
+	// JSONErrorOnError returns the first row-level decoding error.
+	JSONErrorOnError = core.JSONErrorOnError
 )
 
 const (
@@ -318,6 +329,24 @@ func All() Expr { return core.All() }
 
 // Count creates a row-count aggregation expression.
 func Count() Expr { return core.Count() }
+
+// DecodeJSON parses a JSON string expression into the supplied Arrow type.
+func DecodeJSON(expr Expr, schema DataType, options ...JSONDecodeOption) Expr {
+	return core.DecodeJSON(expr, schema, options...)
+}
+
+// WithJSONErrorMode sets the error policy for DecodeJSON.
+func WithJSONErrorMode(mode JSONErrorMode) JSONDecodeOption {
+	return core.WithJSONErrorMode(mode)
+}
+
+// WithJSONCoerce enables or disables compatible JSON-to-type coercions.
+func WithJSONCoerce(enabled bool) JSONDecodeOption { return core.WithJSONCoerce(enabled) }
+
+// WithJSONStrictRequiredFields makes non-nullable struct fields required.
+func WithJSONStrictRequiredFields(enabled bool) JSONDecodeOption {
+	return core.WithJSONStrictRequiredFields(enabled)
+}
 
 // When starts a conditional expression.
 func When(predicate Expr) WhenThen { return core.When(predicate) }

@@ -39,13 +39,21 @@ type nativeOperation struct {
 }
 
 type nativeExpr struct {
-	Kind       string         `json:"kind"`
-	Name       string         `json:"name,omitempty"`
-	Literal    *nativeLiteral `json:"literal,omitempty"`
-	Args       []nativeExpr   `json:"args,omitempty"`
-	WindowKeys []nativeExpr   `json:"window_keys,omitempty"`
-	DType      string         `json:"dtype,omitempty"`
-	Descending bool           `json:"descending,omitempty"`
+	Kind       string            `json:"kind"`
+	Name       string            `json:"name,omitempty"`
+	Literal    *nativeLiteral    `json:"literal,omitempty"`
+	Args       []nativeExpr      `json:"args,omitempty"`
+	WindowKeys []nativeExpr      `json:"window_keys,omitempty"`
+	DType      string            `json:"dtype,omitempty"`
+	JSONDecode *nativeJSONDecode `json:"json_decode,omitempty"`
+	Descending bool              `json:"descending,omitempty"`
+}
+
+type nativeJSONDecode struct {
+	Schema         nativeJSONType `json:"schema"`
+	OnError        string         `json:"on_error"`
+	Coerce         bool           `json:"coerce"`
+	StrictRequired bool           `json:"strict_required_fields"`
 }
 
 type nativeLiteral struct {
@@ -348,6 +356,28 @@ func marshalNativeExpr(node *exprNode) (nativeExpr, bool, error) {
 			return nativeExpr{}, ok, err
 		}
 		result.Args = args
+		if node.jsonDecode != nil {
+			if len(node.args) != 1 {
+				return nativeExpr{}, false, nil
+			}
+			if node.jsonDecode.errorMode != JSONNullOnError && node.jsonDecode.errorMode != JSONErrorOnError {
+				return nativeExpr{}, true, fmt.Errorf("golars: invalid JSON error mode %d", node.jsonDecode.errorMode)
+			}
+			schema, schemaErr := nativeJSONTypeFor(node.jsonDecode.schema)
+			if schemaErr != nil {
+				return nativeExpr{}, true, schemaErr
+			}
+			mode := "null"
+			if node.jsonDecode.errorMode == JSONErrorOnError {
+				mode = "error"
+			}
+			result.JSONDecode = &nativeJSONDecode{
+				Schema:         schema,
+				OnError:        mode,
+				Coerce:         node.jsonDecode.coerce,
+				StrictRequired: node.jsonDecode.strictRequired,
+			}
+		}
 	default:
 		return nativeExpr{}, false, nil
 	}

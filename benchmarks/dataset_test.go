@@ -41,6 +41,7 @@ func TestWriteDatasetAndExecute(t *testing.T) {
 		{SelfJoin, 6, selfJoinRows(2_000, cutoff)},
 		{UniqueTenant, 3, 32},
 		{FullAggregation, 4, 32},
+		{JSONDecode, 1, rows},
 	}
 	for _, test := range tests {
 		result, err := Execute(context.Background(), engine, path, test.query, cutoff)
@@ -61,6 +62,7 @@ func TestWriteDatasetAndExecute(t *testing.T) {
 	checkWindowAggregation(t, ExecuteOrFatal(t, engine, path, WindowAggregation, cutoff), rows, cutoff)
 	checkUniqueTenant(t, ExecuteOrFatal(t, engine, path, UniqueTenant, cutoff))
 	checkMultiAggregation(t, ExecuteOrFatal(t, engine, path, FullAggregation, cutoff), rows, 0)
+	checkJSONDecode(t, ExecuteOrFatal(t, engine, path, JSONDecode, cutoff))
 }
 
 func ExecuteOrFatal(t *testing.T, engine *golars.Engine, path string, query Query, cutoff int64) *golars.DataFrame {
@@ -186,6 +188,25 @@ func checkUniqueTenant(t *testing.T, result *golars.DataFrame) {
 			t.Fatalf("tenant %q appears more than once", tenant)
 		}
 		seen[tenant] = struct{}{}
+	}
+}
+
+func checkJSONDecode(t *testing.T, result *golars.DataFrame) {
+	t.Helper()
+	defer result.Close()
+	rows, err := result.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("JSON decode returned no rows")
+	}
+	decoded, ok := rows[0]["decoded"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded row=%#v, want struct map", rows[0]["decoded"])
+	}
+	if decoded["id"] != int64(0) || decoded["tenant"] != "tenant-00" {
+		t.Fatalf("decoded first row=%#v", decoded)
 	}
 }
 
