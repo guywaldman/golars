@@ -13,8 +13,23 @@ type embeddedLibrary struct {
 	extension string
 }
 
+// Native assets are generated and committed by CI for release branches. A
+// checkout without generated assets remains usable through the portable Go
+// executor.
+var (
+	embeddedLibraryCompressed []byte
+	embeddedLibraryExtension  string
+)
+
 func unsupportedLibrary() (embeddedLibrary, error) {
 	return embeddedLibrary{}, errors.Join(ErrUnavailable, errors.New("no embedded native library for this target"))
+}
+
+func loadEmbeddedLibrary() (embeddedLibrary, error) {
+	if len(embeddedLibraryCompressed) == 0 || embeddedLibraryExtension == "" {
+		return unsupportedLibrary()
+	}
+	return decompressEmbeddedLibrary(embeddedLibraryCompressed, embeddedLibraryExtension)
 }
 
 func decompressEmbeddedLibrary(compressed []byte, extension string) (embeddedLibrary, error) {

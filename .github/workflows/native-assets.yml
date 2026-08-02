@@ -1,0 +1,153 @@
+name: Native assets
+
+on:
+  push:
+    branches:
+      - v0
+    paths:
+      - internal/native/rust/**
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: Branch that should receive the generated asset PR
+        required: true
+        default: v0
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  SOURCE_DATE_EPOCH: 0
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            id: darwin_arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            extension: dylib
+            binary_name: libgolars_native.dylib
+            mode: native
+          - name: linux-amd64
+            id: linux_amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            extension: so
+            binary_name: libgolars_native.so
+            mode: native
+          - name: linux-arm64
+            id: linux_arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            extension: so
+            binary_name: libgolars_native.so
+            mode: cross
+          - name: windows-amd64
+            id: windows_amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: dll
+            binary_name: golars_native.dll
+            mode: native
+          - name: windows-arm64
+            id: windows_arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            extension: dll
+            binary_name: golars_native.dll
+            mode: native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch || github.ref_name }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          cache: true
+      - name: Install cross
+        if: matrix.mode == 'cross'
+        shell: bash
+        run: cargo install cross --locked
+      - name: Build native library
+        if: matrix.mode == 'native'
+        run: cargo build --manifest-path internal/native/rust/Cargo.toml --locked --release --target ${{ matrix.target }}
+      - name: Build native library with cross
+        if: matrix.mode == 'cross'
+        run: cross build --manifest-path internal/native/rust/Cargo.toml --locked --release --target ${{ matrix.target }}
+      - name: Collect raw library
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "artifact/${{ matrix.id }}"
+          cp "internal/native/rust/target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+            "artifact/${{ matrix.id }}/libgolars_native.${{ matrix.extension }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.id }}
+          path: artifact
+
+  assemble:
+    name: Assemble asset update
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch || github.ref_name }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: build-artifacts
+      - name: Package assets and generated embed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/generated-native-assets"
+          specs=(
+            "darwin_arm64 darwin arm64 dylib"
+            "linux_amd64 linux amd64 so"
+            "linux_arm64 linux arm64 so"
+            "windows_amd64 windows amd64 dll"
+            "windows_arm64 windows arm64 dll"
+          )
+          for spec in "${specs[@]}"; do
+            read -r id goos goarch extension <<< "$spec"
+            binary=$(find build-artifacts -type f -path "*/${id}/libgolars_native.${extension}" -print -quit)
+            if [[ -z "$binary" ]]; then
+              echo "missing artifact for $id" >&2
+              exit 1
+            fi
+            bash scripts/package_native_asset.sh \
+              --id "$id" \
+              --goos "$goos" \
+              --goarch "$goarch" \
+              --extension "$extension" \
+              --binary "$binary" \
+              --output-root "$root"
+          done
+          mkdir -p internal/native/assets
+          cp -R "$root/assets/." internal/native/assets/
+          cp "$root"/embedded_*.go internal/native/
+          gofmt -w internal/native/embedded_*.go
+          go test ./internal/native ./internal/core -count=1
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          base: ${{ inputs.base_branch || github.ref_name }}
+          branch: automation/native-assets-${{ github.run_id }}
+          commit-message: "build: refresh native backend assets"
+          title: "build: refresh native backend assets"
+          body: |
+            Generated by the native asset workflow from the pinned Rust/Polars backend.
+
+            The assets are embedded in release Go modules; merge this PR before tagging a release.

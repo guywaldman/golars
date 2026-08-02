@@ -157,6 +157,20 @@ jobs:
             -output /tmp/golars-benchmark.parquet \
             -rows 1000000 \
             -row-group-size 65536
+          cargo build --manifest-path internal/native/rust/Cargo.toml \
+            --locked \
+            --release \
+            --target x86_64-unknown-linux-gnu
+          bash scripts/package_native_asset.sh \
+            --id linux_amd64 \
+            --goos linux \
+            --goarch amd64 \
+            --extension so \
+            --binary internal/native/rust/target/x86_64-unknown-linux-gnu/release/libgolars_native.so \
+            --output-root /tmp/golars-native-assets
+          mkdir -p internal/native/assets
+          cp -R /tmp/golars-native-assets/assets/. internal/native/assets/
+          cp /tmp/golars-native-assets/embedded_linux_amd64.go internal/native/
           go build -o /tmp/golars-benchmark ./cmd/golars-benchmark
           cargo build --manifest-path benchmarks/polars/Cargo.toml --release
       - name: Compare native Go with Rust Polars
