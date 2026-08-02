@@ -64,6 +64,47 @@ func TestFastGroupByPreservesNumericAggregates(t *testing.T) {
 	}
 }
 
+func TestSimpleGroupByMultiAggregatePreservesNullSemantics(t *testing.T) {
+	keys, err := NewSeries("tenant", []string{"a", "a", "b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keys.Close()
+	a, b, c := 1.0, 3.0, 5.0
+	values, err := NewSeries("value", []*float64{&a, nil, &b, &c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer values.Close()
+	df, err := NewDataFrame(keys, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+
+	grouped, err := df.Lazy().GroupBy(Col("tenant")).Agg(
+		Col("value").Count().Alias("count"),
+		Col("value").Sum().Alias("sum"),
+		Col("value").Mean().Alias("mean"),
+	).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grouped.Close()
+	if grouped.Height() != 2 {
+		t.Fatalf("rows=%d, want 2", grouped.Height())
+	}
+	if got := numericColumnValues(t, grouped, "sum"); !reflect.DeepEqual(got, []float64{6, 3}) {
+		t.Fatalf("sums=%v", got)
+	}
+	if got := numericColumnValues(t, grouped, "mean"); !reflect.DeepEqual(got, []float64{3, 3}) {
+		t.Fatalf("means=%v", got)
+	}
+	if got := numericColumnValues(t, grouped, "count"); !reflect.DeepEqual(got, []int64{2, 1}) {
+		t.Fatalf("counts=%v", got)
+	}
+}
+
 func TestGroupByScanRequestIncludesOnlyRequiredColumns(t *testing.T) {
 	base := &planNode{kind: planFilter, input: &planNode{kind: planSource}, exprs: []Expr{Col("id").Ge(Lit(int64(10)))}}
 	request := deriveGroupByScanRequest(base, []Expr{Col("group_id")}, []Expr{Col("value").Sum()})

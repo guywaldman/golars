@@ -76,21 +76,26 @@ type simpleAggState struct {
 }
 
 type simpleGroupBy struct {
-	engine       *Engine
-	spec         simpleGroupBySpec
-	keyIndex     int
-	keyType      arrow.DataType
-	keyKind      simpleKeyKind
-	valueIndices []int
-	valueKinds   []fastValueKind
-	valueTypes   []arrow.DataType
-	intGroups    map[int64]int
-	stringGroups map[string]int
-	keysInt      []int64
-	keysString   []string
-	validKeys    []bool
-	nullGroup    int
-	aggs         []simpleAggState
+	engine        *Engine
+	spec          simpleGroupBySpec
+	keyIndex      int
+	keyType       arrow.DataType
+	keyKind       simpleKeyKind
+	valueIndices  []int
+	valueKinds    []fastValueKind
+	valueTypes    []arrow.DataType
+	fastValueIdx  int
+	fastValueKind fastValueKind
+	fastSumIdx    int
+	fastMeanIdx   int
+	fastCountIdx  int
+	intGroups     map[int64]int
+	stringGroups  map[string]int
+	keysInt       []int64
+	keysString    []string
+	validKeys     []bool
+	nullGroup     int
+	aggs          []simpleAggState
 }
 
 func newSimpleGroupBy(engine *Engine, schema *arrow.Schema, spec simpleGroupBySpec) (*simpleGroupBy, error) {
@@ -117,6 +122,10 @@ func newSimpleGroupBy(engine *Engine, schema *arrow.Schema, spec simpleGroupBySp
 		valueIndices: make([]int, len(spec.aggs)),
 		valueKinds:   make([]fastValueKind, len(spec.aggs)),
 		valueTypes:   make([]arrow.DataType, len(spec.aggs)),
+		fastValueIdx: -1,
+		fastSumIdx:   -1,
+		fastMeanIdx:  -1,
+		fastCountIdx: -1,
 		intGroups:    make(map[int64]int),
 		stringGroups: make(map[string]int),
 		nullGroup:    -1,
@@ -146,7 +155,50 @@ func newSimpleGroupBy(engine *Engine, schema *arrow.Schema, spec simpleGroupBySp
 		group.valueKinds[i] = valueKind
 		group.aggs[i] = simpleAggState{valueKind: valueKind, valueType: valueType}
 	}
+	group.enableFastMulti()
 	return group, nil
+}
+
+func (g *simpleGroupBy) enableFastMulti() {
+	if len(g.spec.aggs) < 2 || g.valueIndices[0] < 0 {
+		return
+	}
+	valueIndex := g.valueIndices[0]
+	var valueKind fastValueKind
+	valueKindSet := false
+	seen := make(map[string]struct{}, len(g.spec.aggs))
+	for index, agg := range g.spec.aggs {
+		if agg.name == "count_rows" || g.valueIndices[index] != valueIndex {
+			return
+		}
+		if _, exists := seen[agg.name]; exists {
+			return
+		}
+		seen[agg.name] = struct{}{}
+		switch agg.name {
+		case "sum":
+			g.fastSumIdx = index
+		case "mean":
+			g.fastMeanIdx = index
+		case "count":
+			g.fastCountIdx = index
+		default:
+			return
+		}
+		if agg.name != "count" {
+			if !valueKindSet {
+				valueKind = g.valueKinds[index]
+				valueKindSet = true
+			} else if g.valueKinds[index] != valueKind {
+				return
+			}
+		}
+	}
+	if !valueKindSet || (g.fastSumIdx < 0 && g.fastMeanIdx < 0 && g.fastCountIdx < 0) {
+		return
+	}
+	g.fastValueIdx = valueIndex
+	g.fastValueKind = valueKind
 }
 
 func (g *simpleGroupBy) add(batch arrow.RecordBatch) error {
@@ -167,6 +219,9 @@ func (g *simpleGroupBy) add(batch arrow.RecordBatch) error {
 		if !ok {
 			return fmt.Errorf("golars: simple group-by key changed type to %T", batch.Column(g.keyIndex))
 		}
+	}
+	if g.fastValueIdx >= 0 {
+		return g.addFastMulti(batch, intKeys, stringKeys)
 	}
 	values := make([]arrow.Array, len(g.valueIndices))
 	floatValues := make([]*array.Float64, len(g.valueIndices))
@@ -220,6 +275,56 @@ func (g *simpleGroupBy) add(batch arrow.RecordBatch) error {
 					}
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func (g *simpleGroupBy) addFastMulti(batch arrow.RecordBatch, intKeys *array.Int64, stringKeys array.StringLike) error {
+	values := batch.Column(g.fastValueIdx)
+	var floatValues *array.Float64
+	var intValues *array.Int64
+	switch g.fastValueKind {
+	case fastFloat64:
+		var ok bool
+		floatValues, ok = values.(*array.Float64)
+		if !ok {
+			return fmt.Errorf("golars: simple group-by value changed type to %T", values)
+		}
+	case fastInt64:
+		var ok bool
+		intValues, ok = values.(*array.Int64)
+		if !ok {
+			return fmt.Errorf("golars: simple group-by value changed type to %T", values)
+		}
+	}
+	for row := 0; row < int(batch.NumRows()); row++ {
+		group := g.groupIndex(intKeys, stringKeys, row)
+		if !values.IsValid(row) {
+			continue
+		}
+		if g.fastSumIdx >= 0 {
+			state := &g.aggs[g.fastSumIdx]
+			state.counts[group]++
+			switch g.fastValueKind {
+			case fastFloat64:
+				state.floatSums[group] += floatValues.Value(row)
+			case fastInt64:
+				state.intSums[group] += intValues.Value(row)
+			}
+		}
+		if g.fastMeanIdx >= 0 {
+			state := &g.aggs[g.fastMeanIdx]
+			state.counts[group]++
+			switch g.fastValueKind {
+			case fastFloat64:
+				state.floatSums[group] += floatValues.Value(row)
+			case fastInt64:
+				state.floatSums[group] += float64(intValues.Value(row))
+			}
+		}
+		if g.fastCountIdx >= 0 {
+			g.aggs[g.fastCountIdx].counts[group]++
 		}
 	}
 	return nil
