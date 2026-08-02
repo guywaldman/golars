@@ -81,6 +81,18 @@ The checked-in assets currently support Linux amd64/arm64 and macOS arm64.
 A target without an embedded asset returns an explicit native-backend
 availability error; there is no portable execution fallback.
 
+## Supported platforms
+
+| Operating system | Architectures | Native execution |
+| --- | --- | --- |
+| Linux | amd64, arm64 | Supported and validated in CI |
+| macOS | arm64 | Supported and validated in CI |
+| Windows | — | Not supported yet ([#3](https://github.com/guywaldman/golars/issues/3)) |
+
+The package can still be compiled on other Go targets, but collection returns
+an explicit native-backend availability error because no matching Polars
+library is embedded.
+
 ## Query planning and storage
 
 Similar to Polars:
