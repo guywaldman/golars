@@ -11,37 +11,60 @@ import (
 	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
-func rowGroupSelection(reader *parquetfile.Reader, schema *arrow.Schema, filters []Predicate, applicable bool) ([]int, []bool, bool, error) {
+func rowGroupSelection(reader *parquetfile.Reader, schema *arrow.Schema, filters []Predicate, applicable bool, filterOnlyColumns []string) ([]int, []bool, []bool, bool, error) {
 	if !applicable || len(filters) == 0 || schema == nil {
-		return nil, nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 	indices := make([]int, 0, reader.NumRowGroups())
 	fullMatches := make([]bool, 0, reader.NumRowGroups())
+	projectionMatches := make([]bool, 0, reader.NumRowGroups())
 	for rowGroup := 0; rowGroup < reader.NumRowGroups(); rowGroup++ {
 		mayMatch := true
 		fullyMatches := true
+		projectionFullyMatches := len(filterOnlyColumns) > 0
+		hasProjectionPredicate := false
 		for _, predicate := range filters {
 			if !rowGroupMayMatch(reader.RowGroup(rowGroup), schema, predicate) {
 				mayMatch = false
 				break
 			}
-			if !rowGroupFullyMatches(reader.RowGroup(rowGroup), schema, predicate) {
+			predicateFullyMatches := rowGroupFullyMatches(reader.RowGroup(rowGroup), schema, predicate)
+			if !predicateFullyMatches {
 				fullyMatches = false
+			}
+			if containsColumn(filterOnlyColumns, predicate.Column) {
+				hasProjectionPredicate = true
+				if !predicateFullyMatches {
+					projectionFullyMatches = false
+				}
 			}
 		}
 		if mayMatch {
 			indices = append(indices, rowGroup)
 			fullMatches = append(fullMatches, fullyMatches)
+			if !hasProjectionPredicate {
+				projectionFullyMatches = fullyMatches
+			}
+			projectionMatches = append(projectionMatches, projectionFullyMatches)
 		}
 	}
-	return indices, fullMatches, true, nil
+	return indices, fullMatches, projectionMatches, true, nil
 }
 
 // RowGroupIndices exposes pruning for package-level tests without exposing the
 // implementation types used by the public scan API.
 func RowGroupIndices(reader *parquetfile.Reader, schema *arrow.Schema, filters []Predicate, applicable bool) ([]int, error) {
-	indices, _, _, err := rowGroupSelection(reader, schema, filters, applicable)
+	indices, _, _, _, err := rowGroupSelection(reader, schema, filters, applicable, nil)
 	return indices, err
+}
+
+func containsColumn(columns []string, name string) bool {
+	for _, column := range columns {
+		if column == name {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFullMatch(fullMatches []bool) bool {

@@ -58,6 +58,10 @@ type filterGuaranteeSource interface {
 	FiltersFullyMatch() bool
 }
 
+type filterColumnGuaranteeSource interface {
+	GuaranteedFilterColumns() []string
+}
+
 // LazyFrame is a deferred logical plan. Constructing transformations does not
 // touch data; errors are returned by terminal methods. Close releases retained
 // Arrow references deterministically; the finalizer is only a safety net.

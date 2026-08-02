@@ -52,6 +52,21 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 		if node.name == "is_in" || node.name == "is_between" || node.name == "is_nan" || node.name == "is_not_nan" || node.name == "is_finite" || node.name == "is_infinite" {
 			return evalPredicateExpr(ctx, engine, node, batch)
 		}
+		if isComparisonCall(node.name) {
+			if result, handled, err := evalScalarComparison(ctx, engine, node, batch); handled {
+				return result, err
+			}
+		}
+		if isStringPredicate(node.name) && len(node.args) == 2 && node.args[1].kind == exprLiteral {
+			if pattern, ok := node.args[1].value.(string); ok {
+				input, err := evalExpr(ctx, engine, node.args[0], batch)
+				if err != nil {
+					return nil, err
+				}
+				defer input.Release()
+				return evalStringPredicateLiteral(node.name, input, pattern, engine.allocator)
+			}
+		}
 		args := make([]arrow.Array, len(node.args))
 		for i, arg := range node.args {
 			arr, err := evalExpr(ctx, engine, arg, batch)
@@ -118,6 +133,15 @@ func coercibleCall(name string) bool {
 	}
 }
 
+func isComparisonCall(name string) bool {
+	switch name {
+	case "equal", "not_equal", "greater", "greater_equal", "less", "less_equal":
+		return true
+	default:
+		return false
+	}
+}
+
 func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow.Array, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("%w: %s needs an input", ErrInvalidPlan, name)
@@ -158,24 +182,26 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 		if values, ok := args[0].(array.StringLike); ok {
 			builder := array.NewInt64Builder(mem)
 			defer builder.Release()
+			builder.Reserve(values.Len())
 			for i := 0; i < values.Len(); i++ {
 				if !values.IsValid(i) {
-					builder.AppendNull()
+					builder.UnsafeAppendBoolToBitmap(false)
 					continue
 				}
-				builder.Append(int64(utf8.RuneCountInString(values.Value(i))))
+				builder.UnsafeAppend(int64(utf8.RuneCountInString(values.Value(i))))
 			}
 			return builder.NewInt64Array(), nil
 		}
 		builder := array.NewInt64Builder(mem)
 		defer builder.Release()
+		builder.Reserve(args[0].Len())
 		for i := 0; i < args[0].Len(); i++ {
 			value, err := scalar.GetScalar(args[0], i)
 			if err != nil || !value.IsValid() {
-				builder.AppendNull()
+				builder.UnsafeAppendBoolToBitmap(false)
 				continue
 			}
-			builder.Append(int64(len([]rune(value.String()))))
+			builder.UnsafeAppend(int64(len([]rune(value.String()))))
 		}
 		return builder.NewInt64Array(), nil
 	}
@@ -200,29 +226,69 @@ func evalStringCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow
 	return builder.NewStringArray(), nil
 }
 
+func isStringPredicate(name string) bool {
+	switch name {
+	case "str_contains", "str_starts_with", "str_ends_with":
+		return true
+	default:
+		return false
+	}
+}
+
+func evalStringPredicateLiteral(name string, input arrow.Array, pattern string, mem *quotaAllocator) (arrow.Array, error) {
+	builder := array.NewBooleanBuilder(mem)
+	defer builder.Release()
+	builder.Reserve(input.Len())
+	if values, ok := input.(array.StringLike); ok {
+		for i := 0; i < values.Len(); i++ {
+			if !values.IsValid(i) {
+				builder.UnsafeAppendBoolToBitmap(false)
+				continue
+			}
+			builder.UnsafeAppend(stringPredicateMatch(name, values.Value(i), pattern))
+		}
+		return builder.NewBooleanArray(), nil
+	}
+	for i := 0; i < input.Len(); i++ {
+		value, err := scalar.GetScalar(input, i)
+		if err != nil {
+			return nil, err
+		}
+		if !value.IsValid() {
+			builder.UnsafeAppendBoolToBitmap(false)
+			continue
+		}
+		builder.UnsafeAppend(stringPredicateMatch(name, value.String(), pattern))
+	}
+	return builder.NewBooleanArray(), nil
+}
+
 func evalStringPredicateFast(name string, left, right array.StringLike, mem *quotaAllocator) (arrow.Array, error) {
 	builder := array.NewBooleanBuilder(mem)
 	defer builder.Release()
+	builder.Reserve(left.Len())
 	for i := 0; i < left.Len(); i++ {
 		if !left.IsValid(i) || !right.IsValid(i) {
-			builder.AppendNull()
+			builder.UnsafeAppendBoolToBitmap(false)
 			continue
 		}
 		leftText, rightText := left.Value(i), right.Value(i)
-		var matched bool
-		switch name {
-		case "str_contains":
-			matched = strings.Contains(leftText, rightText)
-		case "str_starts_with":
-			matched = strings.HasPrefix(leftText, rightText)
-		case "str_ends_with":
-			matched = strings.HasSuffix(leftText, rightText)
-		default:
-			return nil, fmt.Errorf("%w: unsupported string predicate %s", ErrInvalidPlan, name)
-		}
-		builder.Append(matched)
+		builder.UnsafeAppend(stringPredicateMatch(name, leftText, rightText))
 	}
 	return builder.NewBooleanArray(), nil
+}
+
+func stringPredicateMatch(name, value, pattern string) bool {
+	switch name {
+	case "str_contains":
+		return strings.Contains(value, pattern)
+	case "str_starts_with":
+		return strings.HasPrefix(value, pattern)
+	case "str_ends_with":
+		return strings.HasSuffix(value, pattern)
+	default:
+		return false
+	}
 }
 
 func evalTemporalCall(name string, args []arrow.Array, mem *quotaAllocator) (arrow.Array, error) {
@@ -261,6 +327,14 @@ func literalArray(value any, length int64, mem *quotaAllocator) (arrow.Array, er
 	if length < 0 || length > math.MaxInt32 {
 		return nil, fmt.Errorf("golars: invalid literal length %d", length)
 	}
+	sc, err := literalScalar(value)
+	if err != nil {
+		return nil, err
+	}
+	return scalar.MakeArrayFromScalar(sc, int(length), mem)
+}
+
+func literalScalar(value any) (scalar.Scalar, error) {
 	var sc scalar.Scalar
 	if timestamp, ok := value.(time.Time); ok {
 		sc, _ = scalar.MakeScalarParam(arrow.Timestamp(timestamp.UnixNano()), &arrow.TimestampType{Unit: arrow.Nanosecond})
@@ -278,7 +352,7 @@ func literalArray(value any, length int64, mem *quotaAllocator) (arrow.Array, er
 	if sc == nil {
 		return nil, fmt.Errorf("%w: unsupported literal %T", ErrTypeMismatch, value)
 	}
-	return scalar.MakeArrayFromScalar(sc, int(length), mem)
+	return sc, nil
 }
 
 func coalesceArrays(left, right arrow.Array, mem *quotaAllocator) (arrow.Array, error) {

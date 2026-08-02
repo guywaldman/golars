@@ -93,37 +93,45 @@ func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request 
 	emitted := false
 	remaining := int64(math.MaxInt64)
 	var prefetched *prefetch.Prefetch
-	if lf.engine.parallelism > 1 {
+	alreadyPrefetched := false
+	if source, ok := source.(interface{ PrefetchesBatches() bool }); ok {
+		alreadyPrefetched = source.PrefetchesBatches()
+	}
+	if lf.engine.parallelism > 1 && !alreadyPrefetched {
 		prefetched = prefetch.New(ctx, source)
 		defer prefetched.Close()
 	}
-	nextBatch := func() (arrow.RecordBatch, bool, bool) {
+	nextBatch := func() (arrow.RecordBatch, bool, bool, []string) {
 		if prefetched != nil {
 			item, ok := prefetched.Next()
 			if !ok {
-				return nil, false, false
+				return nil, false, false, nil
 			}
-			return item.RecordBatch, true, item.FiltersFullyMatch
+			return item.RecordBatch, true, item.FiltersFullyMatch, item.GuaranteedFilterColumns
 		}
 		if !source.Next() {
-			return nil, false, false
+			return nil, false, false, nil
 		}
 		batch := source.RecordBatch()
 		if batch == nil {
-			return nil, true, false
+			return nil, true, false, nil
 		}
 		batch.Retain()
 		filtersFullyMatch := false
 		if guaranteed, ok := source.(filterGuaranteeSource); ok {
 			filtersFullyMatch = guaranteed.FiltersFullyMatch()
 		}
-		return batch, true, filtersFullyMatch
+		var guaranteedColumns []string
+		if guaranteed, ok := source.(filterColumnGuaranteeSource); ok {
+			guaranteedColumns = guaranteed.GuaranteedFilterColumns()
+		}
+		return batch, true, filtersFullyMatch, guaranteedColumns
 	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		batch, ok, filtersFullyMatch := nextBatch()
+		batch, ok, filtersFullyMatch, guaranteedColumns := nextBatch()
 		if !ok {
 			break
 		}
@@ -135,8 +143,18 @@ func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request 
 			if filtersFullyMatch && node.kind == planFilter {
 				continue
 			}
+			filterNode := (*exprNode)(nil)
+			if node.kind == planFilter && len(guaranteedColumns) > 0 {
+				filterNode = removeGuaranteedFilters(node.exprs[0].node, guaranteedColumns)
+				if filterNode == nil {
+					continue
+				}
+			}
 			if node.kind == planFilter && i+1 < len(nodes) && nodes[i+1].kind == planSelect && canFuseFilterSelect(nodes[i+1].exprs) {
-				next, fuseErr := applyFilterSelect(ctx, lf.engine, batch, node.exprs[0].node, nodes[i+1].exprs)
+				if filterNode == nil {
+					filterNode = node.exprs[0].node
+				}
+				next, fuseErr := applyFilterSelect(ctx, lf.engine, batch, filterNode, nodes[i+1].exprs)
 				batch.Release()
 				if fuseErr != nil {
 					return fuseErr
@@ -146,6 +164,11 @@ func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request 
 				continue
 			}
 			var next arrow.RecordBatch
+			if filterNode != nil {
+				filteredPlan := *node
+				filteredPlan.exprs = []Expr{{node: filterNode}}
+				node = &filteredPlan
+			}
 			next, remaining, err = applyPlanNode(ctx, lf.engine, node, batch, remaining)
 			batch.Release()
 			if err != nil {
@@ -268,6 +291,62 @@ func canFuseFilterSelect(exprs []Expr) bool {
 		}
 	}
 	return true
+}
+
+func removeGuaranteedFilters(node *exprNode, columns []string) *exprNode {
+	if node == nil || len(columns) == 0 {
+		return node
+	}
+	guaranteed := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		guaranteed[column] = struct{}{}
+	}
+	return removeGuaranteedFilterNode(node, guaranteed)
+}
+
+func removeGuaranteedFilterNode(node *exprNode, guaranteed map[string]struct{}) *exprNode {
+	if node == nil {
+		return nil
+	}
+	if node.kind == exprAlias && len(node.args) == 1 {
+		inner := removeGuaranteedFilterNode(node.args[0], guaranteed)
+		if inner == nil {
+			return nil
+		}
+		if inner == node.args[0] {
+			return node
+		}
+		copy := *node
+		copy.args = []*exprNode{inner}
+		return &copy
+	}
+	if node.kind == exprCall && node.name == "and_kleene" && len(node.args) == 2 {
+		left := removeGuaranteedFilterNode(node.args[0], guaranteed)
+		right := removeGuaranteedFilterNode(node.args[1], guaranteed)
+		if left == nil {
+			return right
+		}
+		if right == nil {
+			return left
+		}
+		if left == node.args[0] && right == node.args[1] {
+			return node
+		}
+		copy := *node
+		copy.args = []*exprNode{left, right}
+		return &copy
+	}
+	used := make(map[string]struct{})
+	collectExprColumns(node, used)
+	if len(used) == 0 {
+		return node
+	}
+	for column := range used {
+		if _, ok := guaranteed[column]; !ok {
+			return node
+		}
+	}
+	return nil
 }
 
 func applyFilterSelect(ctx context.Context, engine *Engine, batch arrow.RecordBatch, filterNode *exprNode, exprs []Expr) (arrow.RecordBatch, error) {

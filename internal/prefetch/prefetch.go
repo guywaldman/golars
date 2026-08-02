@@ -18,10 +18,15 @@ type filterGuaranteeSource interface {
 	FiltersFullyMatch() bool
 }
 
+type filterColumnGuaranteeSource interface {
+	GuaranteedFilterColumns() []string
+}
+
 // Batch is one prefetched record batch and its row-group guarantee.
 type Batch struct {
-	RecordBatch       arrow.RecordBatch
-	FiltersFullyMatch bool
+	RecordBatch             arrow.RecordBatch
+	FiltersFullyMatch       bool
+	GuaranteedFilterColumns []string
 }
 
 // Prefetch reads one batch ahead while keeping the queue bounded at one batch.
@@ -55,8 +60,12 @@ func New(ctx context.Context, source Source) *Prefetch {
 			if guaranteed, ok := source.(filterGuaranteeSource); ok {
 				filtersFullyMatch = guaranteed.FiltersFullyMatch()
 			}
+			var guaranteedColumns []string
+			if guaranteed, ok := source.(filterColumnGuaranteeSource); ok {
+				guaranteedColumns = guaranteed.GuaranteedFilterColumns()
+			}
 			select {
-			case prefetch.batches <- Batch{RecordBatch: batch, FiltersFullyMatch: filtersFullyMatch}:
+			case prefetch.batches <- Batch{RecordBatch: batch, FiltersFullyMatch: filtersFullyMatch, GuaranteedFilterColumns: guaranteedColumns}:
 			case <-readCtx.Done():
 				batch.Release()
 				return

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -208,6 +209,69 @@ func TestParquetProjectionPreservesFullAndPartialGroups(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParquetProjectionKeepsPartialFiltersExact(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "compound-projection.parquet")
+	engine, err := NewEngine(WithBatchSize(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	id, err := NewSeries("id", []int64{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer id.Close()
+	tenant, err := NewSeries("tenant", []string{"a", "a", "b", "b", "a", "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tenant.Close()
+	value, err := NewSeries("value", []int64{10, 20, 30, 40, 50, 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer value.Close()
+	df, err := newDataFrame(engine, id, tenant, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+	if err := WriteParquet(ctx, df, path, WithWriteBatchSize(2)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ScanParquet(path).
+		Filter(Col("id").Gt(Lit(int64(2))).And(Col("tenant").Eq(Lit("b")))).
+		Select(Col("tenant"), Col("value")).
+		Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	if result.Height() != 3 {
+		t.Fatalf("expected three matching rows, got %d", result.Height())
+	}
+	if got := allInt64ColumnValues(t, result, "value"); !reflect.DeepEqual(got, []int64{30, 40, 60}) {
+		t.Fatalf("values=%v, want [30 40 60]", got)
+	}
+	series, err := result.Column("tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer series.Close()
+	chunked := series.ArrowChunked()
+	defer chunked.Release()
+	values, ok := chunked.Chunk(0).(array.StringLike)
+	if !ok {
+		t.Fatalf("tenant column has type %T", chunked.Chunk(0))
+	}
+	for row := 0; row < values.Len(); row++ {
+		if !values.IsValid(row) || values.Value(row) != "b" {
+			t.Fatalf("tenant row %d=%q, want b", row, values.Value(row))
+		}
 	}
 }
 

@@ -13,26 +13,29 @@ import (
 // projectionSource reads projected columns from fully matching row groups and
 // keeps filter columns available for partially matching groups.
 type projectionSource struct {
-	ctx              context.Context
-	allocator        memory.Allocator
-	reader           *pqarrow.FileReader
-	outputSchema     *arrow.Schema
-	allColumns       []int
-	projectedColumns []int
-	projectionOnly   bool
-	runs             []projectionRun
-	runIndex         int
-	currentReader    Source
-	current          arrow.RecordBatch
-	currentOwned     bool
-	currentFull      bool
-	parallelism      int
-	err              error
+	ctx               context.Context
+	allocator         memory.Allocator
+	reader            *pqarrow.FileReader
+	outputSchema      *arrow.Schema
+	allColumns        []int
+	projectedColumns  []int
+	projectionOnly    bool
+	runs              []projectionRun
+	runIndex          int
+	currentReader     Source
+	current           arrow.RecordBatch
+	currentOwned      bool
+	currentFull       bool
+	currentProjection bool
+	filterOnlyColumns []string
+	parallelism       int
+	err               error
 }
 
 type projectionRun struct {
-	rowGroups []int
-	full      bool
+	rowGroups  []int
+	full       bool
+	projection bool
 }
 
 func newProjectionSource(
@@ -42,28 +45,32 @@ func newProjectionSource(
 	outputSchema *arrow.Schema,
 	allColumns, projectedColumns, rowGroups []int,
 	fullMatches []bool,
+	projectionMatches []bool,
+	filterOnlyColumns []string,
 	projectionOnly bool,
 	parallelism int,
 ) *projectionSource {
 	runs := make([]projectionRun, 0, len(rowGroups))
 	for i, rowGroup := range rowGroups {
 		full := i < len(fullMatches) && fullMatches[i]
-		if len(runs) > 0 && runs[len(runs)-1].full == full {
+		projection := i < len(projectionMatches) && projectionMatches[i]
+		if len(runs) > 0 && runs[len(runs)-1].full == full && runs[len(runs)-1].projection == projection {
 			runs[len(runs)-1].rowGroups = append(runs[len(runs)-1].rowGroups, rowGroup)
 			continue
 		}
-		runs = append(runs, projectionRun{rowGroups: []int{rowGroup}, full: full})
+		runs = append(runs, projectionRun{rowGroups: []int{rowGroup}, full: full, projection: projection})
 	}
 	return &projectionSource{
-		ctx:              ctx,
-		allocator:        allocator,
-		reader:           reader,
-		outputSchema:     outputSchema,
-		allColumns:       append([]int(nil), allColumns...),
-		projectedColumns: append([]int(nil), projectedColumns...),
-		projectionOnly:   projectionOnly,
-		parallelism:      parallelism,
-		runs:             runs,
+		ctx:               ctx,
+		allocator:         allocator,
+		reader:            reader,
+		outputSchema:      outputSchema,
+		allColumns:        append([]int(nil), allColumns...),
+		projectedColumns:  append([]int(nil), projectedColumns...),
+		projectionOnly:    projectionOnly,
+		filterOnlyColumns: append([]string(nil), filterOnlyColumns...),
+		parallelism:       parallelism,
+		runs:              runs,
 	}
 }
 
@@ -103,10 +110,11 @@ func (s *projectionSource) Next() bool {
 		run := s.runs[s.runIndex]
 		s.runIndex++
 		columns := s.allColumns
-		if run.full {
+		project := run.full || (s.projectionOnly && run.projection)
+		if project {
 			columns = s.projectedColumns
 		}
-		if run.full && s.parallelism > 1 && len(run.rowGroups) > 1 {
+		if (run.full || project) && s.parallelism > 1 && len(run.rowGroups) > 1 {
 			s.currentReader = newParallelSource(s.ctx, s.reader, s.outputSchema, columns, run.rowGroups, s.parallelism)
 		} else {
 			reader, err := s.reader.GetRecordReader(s.ctx, columns, run.rowGroups)
@@ -117,6 +125,7 @@ func (s *projectionSource) Next() bool {
 			s.currentReader = reader
 		}
 		s.currentFull = run.full
+		s.currentProjection = project
 	}
 }
 
@@ -143,6 +152,24 @@ func (s *projectionSource) addMissingColumns(batch arrow.RecordBatch) (arrow.Rec
 func (s *projectionSource) RecordBatch() arrow.RecordBatch { return s.current }
 func (s *projectionSource) Err() error                     { return s.err }
 func (s *projectionSource) FiltersFullyMatch() bool        { return s.currentFull }
+func (s *projectionSource) PrefetchesBatches() bool {
+	if s.parallelism <= 1 {
+		return false
+	}
+	for _, run := range s.runs {
+		project := run.full || (s.projectionOnly && run.projection)
+		if (run.full || project) && len(run.rowGroups) > 1 {
+			return true
+		}
+	}
+	return false
+}
+func (s *projectionSource) GuaranteedFilterColumns() []string {
+	if s.projectionOnly && s.currentProjection && !s.currentFull {
+		return s.filterOnlyColumns
+	}
+	return nil
+}
 
 func (s *projectionSource) releaseCurrent() {
 	if s.currentOwned && s.current != nil {

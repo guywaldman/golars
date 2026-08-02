@@ -22,6 +22,7 @@ type parallelBatch struct {
 
 type parallelSource struct {
 	schema     *arrow.Schema
+	reader     *pqarrow.FileReader
 	groups     []parallelGroup
 	groupIndex int
 	current    arrow.RecordBatch
@@ -55,6 +56,7 @@ func newParallelSource(
 	}
 	source := &parallelSource{
 		schema: schema,
+		reader: reader,
 		groups: make([]parallelGroup, workers),
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -76,7 +78,7 @@ func newParallelSource(
 					if !ok {
 						return
 					}
-					source.readGroup(readCtx, reader, columns, groupIndex)
+					source.readGroup(readCtx, columns, groupIndex)
 				case <-readCtx.Done():
 					return
 				}
@@ -103,13 +105,12 @@ func newParallelSource(
 
 func (s *parallelSource) readGroup(
 	ctx context.Context,
-	reader *pqarrow.FileReader,
 	columns []int,
 	groupIndex int,
 ) {
 	group := &s.groups[groupIndex]
 	defer close(group.batches)
-	groupReader, err := reader.GetRecordReader(ctx, columns, group.rowGroups)
+	groupReader, err := s.reader.GetRecordReader(ctx, columns, group.rowGroups)
 	if err != nil {
 		s.sendGroup(ctx, group, parallelBatch{err: err})
 		return

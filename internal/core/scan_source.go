@@ -292,6 +292,26 @@ func (s *multiSource) FiltersFullyMatch() bool {
 	}
 	return false
 }
+func (s *multiSource) GuaranteedFilterColumns() []string {
+	if source, ok := s.current.(filterColumnGuaranteeSource); ok {
+		return source.GuaranteedFilterColumns()
+	}
+	return nil
+}
+func (s *multiSource) PrefetchesBatches() bool {
+	if s.current != nil {
+		if source, ok := s.current.(interface{ PrefetchesBatches() bool }); ok {
+			return source.PrefetchesBatches()
+		}
+		return false
+	}
+	if len(s.sources) == 1 {
+		if source, ok := s.sources[0].(interface{ PrefetchesBatches() bool }); ok {
+			return source.PrefetchesBatches()
+		}
+	}
+	return false
+}
 func (s *multiSource) Release() {
 	if s.current != nil {
 		s.current.Release()

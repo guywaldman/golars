@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	parquetfile "github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -16,7 +17,7 @@ import (
 // OpenFile opens a local Parquet path. Memory mapping is preferred when the
 // Arrow reader supports it, with a regular-file fallback.
 func OpenFile(ctx context.Context, path string, config Config, request Request) (Source, error) {
-	reader, err := openLocalParquetFile(path)
+	reader, err := openLocalParquetFile(path, config.Allocator)
 	if err != nil {
 		return nil, err
 	}
@@ -90,15 +91,17 @@ func OpenRanged(ctx context.Context, store storage.RangeObjectStore, path string
 	return openParquetReader(ctx, config, reader, arrowReader, request, false, ranged)
 }
 
-func openLocalParquetFile(path string) (*parquetfile.Reader, error) {
-	if reader, err := parquetfile.OpenParquetFile(path, true); err == nil {
+func openLocalParquetFile(path string, allocator memory.Allocator) (*parquetfile.Reader, error) {
+	props := parquet.NewReaderProperties(allocator)
+	props.BufferedStreamEnabled = true
+	if reader, err := parquetfile.OpenParquetFile(path, true, parquetfile.WithReadProps(props)); err == nil {
 		return reader, nil
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	reader, err := parquetfile.NewParquetReader(file)
+	reader, err := parquetfile.NewParquetReader(file, parquetfile.WithReadProps(props))
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -130,6 +133,16 @@ func (s *fileSource) FiltersFullyMatch() bool {
 	}
 	return s.filtersFullyMatch
 }
+func (s *fileSource) PrefetchesBatches() bool {
+	_, ok := s.reader.(*parallelSource)
+	return ok
+}
+func (s *fileSource) GuaranteedFilterColumns() []string {
+	if source, ok := s.reader.(interface{ GuaranteedFilterColumns() []string }); ok {
+		return source.GuaranteedFilterColumns()
+	}
+	return nil
+}
 func (s *fileSource) Release() {
 	if s.reader != nil {
 		s.reader.Release()
@@ -158,7 +171,7 @@ func openParquetReader(ctx context.Context, config Config, reader *parquetfile.R
 		closeAll()
 		return nil, err
 	}
-	rowGroups, fullMatches, selectionApplicable, err := rowGroupSelection(reader, schema, request.Filters, request.SelectionApplicable)
+	rowGroups, fullMatches, projectionMatches, selectionApplicable, err := rowGroupSelection(reader, schema, request.Filters, request.SelectionApplicable, request.FilterOnlyColumns)
 	if err != nil {
 		closeAll()
 		return nil, err
@@ -169,7 +182,7 @@ func openParquetReader(ctx context.Context, config Config, reader *parquetfile.R
 	if len(request.Filters) > 0 && selectionApplicable && len(rowGroups) == 0 {
 		return &fileSource{reader: &emptySource{schema: schema}, closers: fileClosers}, nil
 	}
-	if local && selectionApplicable && len(request.FilterOnlyColumns) > 0 && len(request.ProjectionColumns) > 0 && hasFullMatch(fullMatches) {
+	if local && selectionApplicable && len(request.FilterOnlyColumns) > 0 && len(request.ProjectionColumns) > 0 && hasFullMatch(projectionMatches) {
 		projectionIndices, projectionErr := parquetColumnIndices(arrowReader, request.ProjectionColumns, config.MissingColumn)
 		if projectionErr != nil {
 			closeAll()
@@ -180,7 +193,7 @@ func openParquetReader(ctx context.Context, config Config, reader *parquetfile.R
 		if request.Limit > 0 {
 			parallelism = 1
 		}
-		projected := newProjectionSource(ctx, config.Allocator, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches, request.ProjectionOnlyBatches, parallelism)
+		projected := newProjectionSource(ctx, config.Allocator, arrowReader, requestedSchema, columnIndices, projectionIndices, rowGroups, fullMatches, projectionMatches, request.FilterOnlyColumns, request.ProjectionOnlyBatches, parallelism)
 		return &fileSource{reader: projected, closers: fileClosers}, nil
 	}
 	// The Arrow reader parallelizes columns, but row groups remain serial. For
