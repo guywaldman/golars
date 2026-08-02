@@ -107,7 +107,8 @@ func rowGroupFullyMatches(rowGroup *parquetfile.RowGroupReader, schema *arrow.Sc
 	case arrow.BOOL,
 		arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
 		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64,
-		arrow.DATE32, arrow.DATE64, arrow.TIMESTAMP:
+		arrow.DATE32, arrow.DATE64, arrow.TIMESTAMP,
+		arrow.STRING, arrow.LARGE_STRING, arrow.BINARY, arrow.LARGE_BINARY:
 	default:
 		return false
 	}

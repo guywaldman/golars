@@ -39,16 +39,27 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 	columns := make(map[string]struct{})
 	projectionColumns := make(map[string]struct{})
 	filterColumns := make(map[string]struct{})
+	resolver := scanColumnResolver{derived: make(map[string]*exprNode)}
 	var requestFilters []*exprNode
 	var limit int64
 	for _, node := range nodes[1 : len(nodes)-1] {
 		switch node.kind {
 		case planFilter:
 			filter := node.exprs[0].node
-			collectExprColumns(filter, columns)
-			collectExprColumns(filter, filterColumns)
+			if !resolver.collect(filter, columns) || !resolver.collect(filter, filterColumns) {
+				return scanRequest{}
+			}
 			if filter != nil {
 				requestFilters = append(requestFilters, filter)
+			}
+		case planWithColumns:
+			for _, expr := range node.exprs {
+				if !resolver.collect(expr.node, columns) || !resolver.collect(expr.node, projectionColumns) {
+					return scanRequest{}
+				}
+			}
+			for _, expr := range node.exprs {
+				resolver.derived[expr.outputName()] = expr.node
 			}
 		case planLimit:
 			if node.limit > 0 && (limit == 0 || node.limit < limit) {
@@ -59,11 +70,9 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		}
 	}
 	for _, expr := range nodes[len(nodes)-1].exprs {
-		if expr.node != nil && expr.node.kind == exprCall && expr.node.name == "all_columns" {
+		if !resolver.collect(expr.node, columns) || !resolver.collect(expr.node, projectionColumns) {
 			return scanRequest{}
 		}
-		collectExprColumns(expr.node, columns)
-		collectExprColumns(expr.node, projectionColumns)
 	}
 	if len(columns) == 0 {
 		return scanRequest{}
@@ -81,6 +90,48 @@ func deriveScanRequest(nodes []*planNode) scanRequest {
 		limit:                 limit,
 		filters:               requestFilters,
 	}
+}
+
+type scanColumnResolver struct {
+	derived   map[string]*exprNode
+	resolving map[string]struct{}
+}
+
+func (r *scanColumnResolver) collect(node *exprNode, columns map[string]struct{}) bool {
+	if node == nil {
+		return true
+	}
+	if node.kind == exprColumn {
+		derived, ok := r.derived[node.name]
+		if !ok {
+			columns[node.name] = struct{}{}
+			return true
+		}
+		if r.resolving == nil {
+			r.resolving = make(map[string]struct{})
+		}
+		if _, active := r.resolving[node.name]; active {
+			return false
+		}
+		r.resolving[node.name] = struct{}{}
+		ok = r.collect(derived, columns)
+		delete(r.resolving, node.name)
+		return ok
+	}
+	if node.kind == exprCall && node.name == "all_columns" {
+		return false
+	}
+	for _, arg := range node.args {
+		if !r.collect(arg, columns) {
+			return false
+		}
+	}
+	for _, key := range node.windowKeys {
+		if !r.collect(key, columns) {
+			return false
+		}
+	}
+	return true
 }
 
 func deriveGroupByScanRequest(plan *planNode, keys, exprs []Expr) scanRequest {

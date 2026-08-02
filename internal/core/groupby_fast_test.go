@@ -75,6 +75,41 @@ func TestGroupByScanRequestIncludesOnlyRequiredColumns(t *testing.T) {
 	}
 }
 
+func TestScanRequestResolvesWithColumnsDependencies(t *testing.T) {
+	source := &planNode{kind: planSource}
+	filter := &planNode{
+		kind:  planFilter,
+		input: source,
+		exprs: []Expr{Col("id").Ge(Lit(int64(10)))},
+	}
+	withColumns := &planNode{
+		kind:  planWithColumns,
+		input: filter,
+		exprs: []Expr{
+			Col("value").Mul(Col("quantity").Cast(Float64)).Alias("revenue"),
+			Col("payload").Str().Lengths().Alias("payload_len"),
+		},
+	}
+	selectNode := &planNode{
+		kind:  planSelect,
+		input: withColumns,
+		exprs: []Expr{Col("tenant"), Col("revenue"), Col("payload_len")},
+	}
+	request := deriveScanRequest([]*planNode{source, filter, withColumns, selectNode})
+	if !reflect.DeepEqual(request.columns, []string{"id", "payload", "quantity", "tenant", "value"}) {
+		t.Fatalf("columns=%v", request.columns)
+	}
+	if !reflect.DeepEqual(request.projectionColumns, []string{"payload", "quantity", "tenant", "value"}) {
+		t.Fatalf("projection columns=%v", request.projectionColumns)
+	}
+	if !reflect.DeepEqual(request.filterOnlyColumns, []string{"id"}) {
+		t.Fatalf("filter-only columns=%v", request.filterOnlyColumns)
+	}
+	if len(request.filters) != 1 || !request.projectionOnlyBatches {
+		t.Fatalf("request filters=%d projection-only=%v", len(request.filters), request.projectionOnlyBatches)
+	}
+}
+
 func numericColumnValues(t *testing.T, df *DataFrame, name string) any {
 	t.Helper()
 	series, err := df.Column(name)
