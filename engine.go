@@ -1,15 +1,14 @@
 package golars
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	internalstorage "github.com/guywaldman/golars/internal/storage"
 )
 
 const DefaultMemoryLimit int64 = 1 << 30
@@ -20,31 +19,7 @@ type engineConfig struct {
 	memoryLimit int64
 	parallelism int
 	batchSize   int64
-	stores      map[string]ObjectStore
-}
-
-// ObjectStore is the minimal storage contract used by scans and sinks. Stores
-// are registered by URI scheme (for example "s3" or "gs"); no session object
-// is required for ordinary package-level use.
-type ObjectStore interface {
-	Open(context.Context, string) (io.ReadCloser, error)
-	Create(context.Context, string) (io.WriteCloser, error)
-	Glob(context.Context, string) ([]string, error)
-}
-
-// ObjectInfo contains the metadata needed for random-access scans.
-type ObjectInfo struct {
-	Size int64
-}
-
-// RangeObjectStore is an optional extension used by Parquet scans. Stores that
-// implement it allow the engine to read metadata and column chunks with HTTP
-// range requests instead of downloading the whole object. Existing ObjectStore
-// implementations remain valid and use the materializing fallback.
-type RangeObjectStore interface {
-	ObjectStore
-	Stat(context.Context, string) (ObjectInfo, error)
-	OpenRange(context.Context, string, int64, int64) (io.ReadCloser, error)
+	stores      map[string]internalstorage.ObjectStore
 }
 
 func WithObjectStore(scheme string, store ObjectStore) EngineOption {
@@ -54,7 +29,7 @@ func WithObjectStore(scheme string, store ObjectStore) EngineOption {
 			return fmt.Errorf("golars: object store scheme and store are required")
 		}
 		if c.stores == nil {
-			c.stores = make(map[string]ObjectStore)
+			c.stores = make(map[string]internalstorage.ObjectStore)
 		}
 		c.stores[scheme] = store
 		return nil
@@ -133,13 +108,13 @@ type Engine struct {
 	allocator   *quotaAllocator
 	parallelism int
 	batchSize   int64
-	stores      map[string]ObjectStore
+	stores      map[string]internalstorage.ObjectStore
 	storeMu     sync.RWMutex
 	closed      atomic.Bool
 }
 
 func NewEngine(options ...EngineOption) (*Engine, error) {
-	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, stores: make(map[string]ObjectStore)}
+	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, stores: make(map[string]internalstorage.ObjectStore)}
 	for _, option := range options {
 		if err := option(&config); err != nil {
 			return nil, err

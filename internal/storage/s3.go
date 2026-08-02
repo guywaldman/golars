@@ -1,0 +1,150 @@
+package storage
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"path"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/guywaldman/golars/internal/storageuri"
+)
+
+// S3Store adapts an AWS S3-compatible object store to the scan/sink API.
+type S3Store struct{ client *s3.Client }
+
+func NewS3Store(ctx context.Context, options ...func(*s3.Options)) (*S3Store, error) {
+	config, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &S3Store{client: s3.NewFromConfig(config, options...)}, nil
+}
+
+func NewS3StoreWithClient(client *s3.Client) (*S3Store, error) {
+	if client == nil {
+		return nil, fmt.Errorf("golars: nil S3 client")
+	}
+	return &S3Store{client: client}, nil
+}
+
+func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
+	bucket, key, err := storageuri.Parse(uri, "s3")
+	if err != nil {
+		return nil, err
+	}
+	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, err
+	}
+	return object.Body, nil
+}
+
+func (s *S3Store) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
+	bucket, key, err := storageuri.Parse(uri, "s3")
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	object, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if object.ContentLength == nil {
+		return ObjectInfo{}, fmt.Errorf("golars: S3 object %q has no content length", uri)
+	}
+	return ObjectInfo{Size: *object.ContentLength}, nil
+}
+
+func (s *S3Store) OpenRange(ctx context.Context, uri string, offset, length int64) (io.ReadCloser, error) {
+	if err := storageuri.ValidateRange(offset, length); err != nil {
+		return nil, err
+	}
+	bucket, key, err := storageuri.Parse(uri, "s3")
+	if err != nil {
+		return nil, err
+	}
+	end := offset + length - 1
+	rangeValue := fmt.Sprintf("bytes=%d-%d", offset, end)
+	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeValue),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object.Body, nil
+}
+
+func (s *S3Store) Create(ctx context.Context, uri string) (io.WriteCloser, error) {
+	bucket, key, err := storageuri.Parse(uri, "s3")
+	if err != nil {
+		return nil, err
+	}
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, putErr := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: reader})
+		done <- putErr
+		_ = reader.CloseWithError(putErr)
+	}()
+	return &s3WriteCloser{writer: writer, done: done}, nil
+}
+
+func (s *S3Store) Glob(ctx context.Context, pattern string) ([]string, error) {
+	bucket, keyPattern, err := storageuri.Parse(pattern, "s3")
+	if err != nil {
+		return nil, err
+	}
+	prefix := keyPattern
+	if index := strings.IndexAny(prefix, "*?["); index >= 0 {
+		prefix = prefix[:index]
+	}
+	result := make([]string, 0)
+	var token *string
+	for {
+		page, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix), ContinuationToken: token})
+		if err != nil {
+			return nil, err
+		}
+		for _, object := range page.Contents {
+			if object.Key == nil {
+				continue
+			}
+			matched, matchErr := path.Match(keyPattern, *object.Key)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if matched {
+				result = append(result, "s3://"+bucket+"/"+*object.Key)
+			}
+		}
+		if !aws.ToBool(page.IsTruncated) || page.NextContinuationToken == nil {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	return result, nil
+}
+
+type s3WriteCloser struct {
+	writer *io.PipeWriter
+	done   chan error
+	closed bool
+}
+
+func (w *s3WriteCloser) Write(data []byte) (int, error) { return w.writer.Write(data) }
+
+func (w *s3WriteCloser) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if err := w.writer.Close(); err != nil {
+		return err
+	}
+	return <-w.done
+}

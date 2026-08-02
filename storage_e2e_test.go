@@ -23,9 +23,7 @@ import (
 func TestE2ES3LocalStack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if !dockerAvailable(ctx) {
-		t.Skip("Docker is unavailable")
-	}
+	requireDocker(t, ctx)
 	container, endpoint := runEmulator(t, ctx, "localstack/localstack:3.8.1", "4566/tcp", wait.ForHTTP("/_localstack/health").WithPort("4566/tcp"), map[string]string{"SERVICES": "s3", "AWS_DEFAULT_REGION": "us-east-1"})
 	defer terminateContainer(t, container)
 
@@ -82,9 +80,7 @@ func TestE2ES3LocalStack(t *testing.T) {
 func TestE2EGCSFakeServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if !dockerAvailable(ctx) {
-		t.Skip("Docker is unavailable")
-	}
+	requireDocker(t, ctx)
 	container, endpoint := runEmulator(t, ctx, "fsouza/fake-gcs-server:1.52.3", "4443/tcp", wait.ForHTTP("/storage/v1/b").WithPort("4443/tcp"), nil, "-scheme", "http")
 	defer terminateContainer(t, container)
 	t.Setenv("STORAGE_EMULATOR_HOST", endpoint)
@@ -145,17 +141,21 @@ func e2eFrame(t *testing.T, engine *Engine) *DataFrame {
 	return df
 }
 
-func dockerAvailable(ctx context.Context) bool {
+func requireDocker(t *testing.T, ctx context.Context) {
+	t.Helper()
+	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	provider, err := testcontainers.NewDockerProvider()
 	if err != nil {
-		return false
+		t.Fatalf("Docker is required for E2E tests: %v", err)
 	}
 	defer provider.Close()
-	if _, err := provider.Client().Ping(ctx, dockerclient.PingOptions{}); err != nil {
-		return false
+	if _, err := provider.Client().Ping(checkCtx, dockerclient.PingOptions{}); err != nil {
+		t.Fatalf("Docker is required for E2E tests: %v", err)
 	}
-	_, err = provider.DaemonHost(ctx)
-	return err == nil
+	if _, err := provider.DaemonHost(checkCtx); err != nil {
+		t.Fatalf("Docker is required for E2E tests: %v", err)
+	}
 }
 
 func runEmulator(t *testing.T, ctx context.Context, image, port string, strategy wait.Strategy, env map[string]string, command ...string) (testcontainers.Container, string) {

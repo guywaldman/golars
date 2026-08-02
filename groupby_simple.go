@@ -8,6 +8,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
+	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
 type simpleGroupBySpec struct {
@@ -95,7 +96,7 @@ type simpleGroupBy struct {
 func newSimpleGroupBy(engine *Engine, schema *arrow.Schema, spec simpleGroupBySpec) (*simpleGroupBy, error) {
 	keyFields := schema.FieldIndices(spec.keyName)
 	if len(keyFields) == 0 {
-		return nil, &ColumnNotFoundError{Name: spec.keyName, Available: schemaNames(schema)}
+		return nil, &ColumnNotFoundError{Name: spec.keyName, Available: arrowutil.SchemaNames(schema)}
 	}
 	keyType := schema.Field(keyFields[0]).Type
 	var keyKind simpleKeyKind
@@ -129,7 +130,7 @@ func newSimpleGroupBy(engine *Engine, schema *arrow.Schema, spec simpleGroupBySp
 		}
 		valueFields := schema.FieldIndices(agg.valueName)
 		if len(valueFields) == 0 {
-			return nil, &ColumnNotFoundError{Name: agg.valueName, Available: schemaNames(schema)}
+			return nil, &ColumnNotFoundError{Name: agg.valueName, Available: arrowutil.SchemaNames(schema)}
 		}
 		valueType := schema.Field(valueFields[0]).Type
 		group.valueIndices[i] = valueFields[0]
@@ -292,7 +293,7 @@ func (g *simpleGroupBy) result() (*DataFrame, error) {
 	keyBuilder.Release()
 	columns := []arrow.Array{keyArray}
 	fields := []arrow.Field{{Name: g.spec.keyOutput, Type: g.keyType, Nullable: true}}
-	defer func() { releaseArrays(columns) }()
+	defer func() { arrowutil.ReleaseArrays(columns) }()
 	for i, spec := range g.spec.aggs {
 		var valueArray arrow.Array
 		var valueType arrow.DataType
@@ -349,7 +350,7 @@ func (g *simpleGroupBy) result() (*DataFrame, error) {
 		columns = append(columns, valueArray)
 		fields = append(fields, arrow.Field{Name: spec.output, Type: valueType, Nullable: true})
 	}
-	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arraysAsSlices(columns))
+	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns))
 	return &DataFrame{table: table, engine: g.engine}, nil
 }
 

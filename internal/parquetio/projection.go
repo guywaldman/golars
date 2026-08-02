@@ -1,27 +1,26 @@
-package golars
+package parquetio
 
 import (
 	"context"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
-// parquetProjectionSource reads only projected columns from row groups whose
-// filters are proven true. Partial groups still read every column needed by
-// the filter and go through the normal exact filter evaluation. A terminal
-// select can consume mixed-width source batches because it normalizes every
-// batch to its projected output; blocking consumers keep the stable schema.
-type parquetProjectionSource struct {
+// projectionSource reads projected columns from fully matching row groups and
+// keeps filter columns available for partially matching groups.
+type projectionSource struct {
 	ctx              context.Context
-	engine           *Engine
+	allocator        memory.Allocator
 	reader           *pqarrow.FileReader
 	outputSchema     *arrow.Schema
 	allColumns       []int
 	projectedColumns []int
 	projectionOnly   bool
-	runs             []parquetProjectionRun
+	runs             []projectionRun
 	runIndex         int
 	currentReader    pqarrow.RecordReader
 	current          arrow.RecordBatch
@@ -30,32 +29,32 @@ type parquetProjectionSource struct {
 	err              error
 }
 
-type parquetProjectionRun struct {
+type projectionRun struct {
 	rowGroups []int
 	full      bool
 }
 
-func newParquetProjectionSource(
+func newProjectionSource(
 	ctx context.Context,
-	engine *Engine,
+	allocator memory.Allocator,
 	reader *pqarrow.FileReader,
 	outputSchema *arrow.Schema,
 	allColumns, projectedColumns, rowGroups []int,
 	fullMatches []bool,
 	projectionOnly bool,
-) *parquetProjectionSource {
-	runs := make([]parquetProjectionRun, 0, len(rowGroups))
+) *projectionSource {
+	runs := make([]projectionRun, 0, len(rowGroups))
 	for i, rowGroup := range rowGroups {
 		full := i < len(fullMatches) && fullMatches[i]
 		if len(runs) > 0 && runs[len(runs)-1].full == full {
 			runs[len(runs)-1].rowGroups = append(runs[len(runs)-1].rowGroups, rowGroup)
 			continue
 		}
-		runs = append(runs, parquetProjectionRun{rowGroups: []int{rowGroup}, full: full})
+		runs = append(runs, projectionRun{rowGroups: []int{rowGroup}, full: full})
 	}
-	return &parquetProjectionSource{
+	return &projectionSource{
 		ctx:              ctx,
-		engine:           engine,
+		allocator:        allocator,
 		reader:           reader,
 		outputSchema:     outputSchema,
 		allColumns:       append([]int(nil), allColumns...),
@@ -65,9 +64,9 @@ func newParquetProjectionSource(
 	}
 }
 
-func (s *parquetProjectionSource) Schema() *arrow.Schema { return s.outputSchema }
+func (s *projectionSource) Schema() *arrow.Schema { return s.outputSchema }
 
-func (s *parquetProjectionSource) Next() bool {
+func (s *projectionSource) Next() bool {
 	s.releaseCurrent()
 	for {
 		if s.currentReader != nil {
@@ -99,23 +98,22 @@ func (s *parquetProjectionSource) Next() bool {
 			return false
 		}
 		run := s.runs[s.runIndex]
-		full := run.full
+		s.runIndex++
 		columns := s.allColumns
-		if full {
+		if run.full {
 			columns = s.projectedColumns
 		}
 		reader, err := s.reader.GetRecordReader(s.ctx, columns, run.rowGroups)
-		s.runIndex++
 		if err != nil {
 			s.err = err
 			return false
 		}
 		s.currentReader = reader
-		s.currentFull = full
+		s.currentFull = run.full
 	}
 }
 
-func (s *parquetProjectionSource) addMissingColumns(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+func (s *projectionSource) addMissingColumns(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
 	projectionPositions := make(map[int]int, len(s.projectedColumns))
 	for position, column := range s.projectedColumns {
 		projectionPositions[column] = position
@@ -128,18 +126,18 @@ func (s *parquetProjectionSource) addMissingColumns(batch arrow.RecordBatch) (ar
 			columns[position] = value
 			continue
 		}
-		columns[position] = array.MakeArrayOfNull(s.engine.allocator, s.outputSchema.Field(position).Type, int(batch.NumRows()))
+		columns[position] = array.MakeArrayOfNull(s.allocator, s.outputSchema.Field(position).Type, int(batch.NumRows()))
 	}
 	result := array.NewRecordBatch(s.outputSchema, columns, batch.NumRows())
-	releaseArrays(columns)
+	arrowutil.ReleaseArrays(columns)
 	return result, nil
 }
 
-func (s *parquetProjectionSource) RecordBatch() arrow.RecordBatch { return s.current }
-func (s *parquetProjectionSource) Err() error                     { return s.err }
-func (s *parquetProjectionSource) FiltersFullyMatch() bool        { return s.currentFull }
+func (s *projectionSource) RecordBatch() arrow.RecordBatch { return s.current }
+func (s *projectionSource) Err() error                     { return s.err }
+func (s *projectionSource) FiltersFullyMatch() bool        { return s.currentFull }
 
-func (s *parquetProjectionSource) releaseCurrent() {
+func (s *projectionSource) releaseCurrent() {
 	if s.currentOwned && s.current != nil {
 		s.current.Release()
 	}
@@ -147,7 +145,7 @@ func (s *parquetProjectionSource) releaseCurrent() {
 	s.currentOwned = false
 }
 
-func (s *parquetProjectionSource) Release() {
+func (s *projectionSource) Release() {
 	s.releaseCurrent()
 	if s.currentReader != nil {
 		s.currentReader.Release()

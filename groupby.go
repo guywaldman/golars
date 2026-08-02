@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
+	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
 type groupState struct {
@@ -64,7 +65,7 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 		for i, expr := range keys {
 			arr, err := evalExpr(ctx, df.engine, expr.node, batch)
 			if err != nil {
-				releaseArrays(keyArrays)
+				arrowutil.ReleaseArrays(keyArrays)
 				return nil, err
 			}
 			keyArrays[i] = arr
@@ -78,8 +79,8 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 			if node.kind == exprAggregate && node.name != "count_rows" {
 				arr, err := evalExpr(ctx, df.engine, node.args[0], batch)
 				if err != nil {
-					releaseArrays(keyArrays)
-					releaseArrays(aggArrays)
+					arrowutil.ReleaseArrays(keyArrays)
+					arrowutil.ReleaseArrays(aggArrays)
 					return nil, err
 				}
 				aggArrays[i] = arr
@@ -96,8 +97,8 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 			for i, arr := range keyArrays {
 				value, err := scalar.GetScalar(arr, row)
 				if err != nil {
-					releaseArrays(keyArrays)
-					releaseArrays(aggArrays)
+					arrowutil.ReleaseArrays(keyArrays)
+					arrowutil.ReleaseArrays(aggArrays)
 					return nil, err
 				}
 				keyValues[i] = cloneScalar(value)
@@ -125,8 +126,8 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 				}
 				value, err := scalar.GetScalar(aggArrays[i], row)
 				if err != nil {
-					releaseArrays(keyArrays)
-					releaseArrays(aggArrays)
+					arrowutil.ReleaseArrays(keyArrays)
+					arrowutil.ReleaseArrays(aggArrays)
 					return nil, err
 				}
 				if !value.IsValid() {
@@ -137,7 +138,7 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 				case "count":
 					// count is already incremented for each valid input value.
 				case "sum", "mean":
-					if numeric, ok := scalarNumber(value); ok {
+					if numeric, ok := arrowutil.ScalarNumber(value); ok {
 						stateAgg.sum += numeric
 						stateAgg.validSum = true
 					}
@@ -160,8 +161,8 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 				}
 			}
 		}
-		releaseArrays(keyArrays)
-		releaseArrays(aggArrays)
+		arrowutil.ReleaseArrays(keyArrays)
+		arrowutil.ReleaseArrays(aggArrays)
 	}
 	if err := reader.Err(); err != nil {
 		return nil, err
@@ -225,17 +226,9 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 	for i, builder := range builders {
 		columns[i] = builder.NewArray()
 	}
-	defer releaseArrays(columns)
-	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arraysAsSlices(columns))
+	defer arrowutil.ReleaseArrays(columns)
+	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns))
 	return &DataFrame{table: table, engine: df.engine}, nil
-}
-
-func arraysAsSlices(arrays []arrow.Array) [][]arrow.Array {
-	data := make([][]arrow.Array, len(arrays))
-	for i, arr := range arrays {
-		data[i] = []arrow.Array{arr}
-	}
-	return data
 }
 
 func unwrapAlias(node *exprNode) *exprNode {
@@ -295,37 +288,9 @@ func aggregateValue(state aggState, name string) scalar.Scalar {
 	}
 }
 
-func scalarNumber(value scalar.Scalar) (float64, bool) {
-	switch v := value.(type) {
-	case *scalar.Int8:
-		return float64(v.Value), true
-	case *scalar.Int16:
-		return float64(v.Value), true
-	case *scalar.Int32:
-		return float64(v.Value), true
-	case *scalar.Int64:
-		return float64(v.Value), true
-	case *scalar.Uint8:
-		return float64(v.Value), true
-	case *scalar.Uint16:
-		return float64(v.Value), true
-	case *scalar.Uint32:
-		return float64(v.Value), true
-	case *scalar.Uint64:
-		return float64(v.Value), true
-	case *scalar.Float32:
-		return float64(v.Value), true
-	case *scalar.Float64:
-		return v.Value, true
-	default:
-		value, err := strconv.ParseFloat(value.String(), 64)
-		return value, err == nil
-	}
-}
-
 func compareScalars(left, right scalar.Scalar) int {
-	leftNumber, leftOK := scalarNumber(left)
-	rightNumber, rightOK := scalarNumber(right)
+	leftNumber, leftOK := arrowutil.ScalarNumber(left)
+	rightNumber, rightOK := arrowutil.ScalarNumber(right)
 	if leftOK && rightOK {
 		if leftNumber < rightNumber {
 			return -1

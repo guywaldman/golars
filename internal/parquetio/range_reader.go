@@ -1,18 +1,19 @@
-package golars
+package parquetio
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/guywaldman/golars/internal/storage"
 )
 
 // rangeReaderAtSeeker adapts ranged object reads to Parquet's ReaderAtSeeker
-// contract. Each ReadAt becomes one bounded object-store request; the Parquet
-// reader therefore fetches only footer and column-chunk bytes it needs.
+// contract. Each ReadAt becomes one bounded object-store request.
 type rangeReaderAtSeeker struct {
 	ctx   context.Context
-	store RangeObjectStore
+	store storage.RangeObjectStore
 	uri   string
 	size  int64
 
@@ -21,7 +22,7 @@ type rangeReaderAtSeeker struct {
 	closed bool
 }
 
-func newRangeReaderAtSeeker(ctx context.Context, store RangeObjectStore, uri string, size int64) (*rangeReaderAtSeeker, error) {
+func newRangeReaderAtSeeker(ctx context.Context, store storage.RangeObjectStore, uri string, size int64) (*rangeReaderAtSeeker, error) {
 	if store == nil {
 		return nil, fmt.Errorf("golars: nil range object store")
 	}

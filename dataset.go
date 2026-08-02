@@ -12,6 +12,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
+	"github.com/guywaldman/golars/internal/arrowutil"
+	"github.com/guywaldman/golars/internal/storageuri"
 )
 
 type DatasetMode uint8
@@ -57,7 +59,7 @@ func WriteParquetDataset(ctx context.Context, df *DataFrame, destination string,
 	if err := validatePartitionNames(config.partitionBy); err != nil {
 		return err
 	}
-	if uriScheme(destination) != "" {
+	if storageuri.Scheme(destination) != "" {
 		return fmt.Errorf("golars: Parquet dataset sinks currently require a local directory")
 	}
 	if config.mode == DatasetCreate {
@@ -88,7 +90,7 @@ func WriteParquetDataset(ctx context.Context, df *DataFrame, destination string,
 	for i, name := range config.partitionBy {
 		indices := batch.Schema().FieldIndices(name)
 		if len(indices) == 0 {
-			return &ColumnNotFoundError{Name: name, Available: schemaNames(batch.Schema())}
+			return &ColumnNotFoundError{Name: name, Available: arrowutil.SchemaNames(batch.Schema())}
 		}
 		partitionArrays[i] = batch.Column(indices[0])
 	}
@@ -176,7 +178,7 @@ func dropRecordColumns(record arrow.RecordBatch, names []string) arrow.RecordBat
 		fields = append(fields, field)
 	}
 	out := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, record.NumRows())
-	releaseArrays(columns)
+	arrowutil.ReleaseArrays(columns)
 	return out
 }
 

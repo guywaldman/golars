@@ -1,4 +1,4 @@
-package golars
+package parquetio
 
 import (
 	"github.com/apache/arrow-go/v18/arrow"
@@ -6,7 +6,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
-type parquetFilterSource struct {
+type filterSource struct {
 	reader       pqarrow.RecordReader
 	groupRows    []int64
 	fullMatches  []bool
@@ -16,21 +16,17 @@ type parquetFilterSource struct {
 	fullyMatches bool
 }
 
-func newParquetFilterSource(reader pqarrow.RecordReader, file *parquetfile.Reader, rowGroups []int, fullMatches []bool) *parquetFilterSource {
+func newFilterSource(reader pqarrow.RecordReader, file *parquetfile.Reader, rowGroups []int, fullMatches []bool) *filterSource {
 	groupRows := make([]int64, len(rowGroups))
 	for i, rowGroup := range rowGroups {
 		groupRows[i] = file.RowGroup(rowGroup).NumRows()
 	}
-	return &parquetFilterSource{
-		reader:      reader,
-		groupRows:   groupRows,
-		fullMatches: append([]bool(nil), fullMatches...),
-	}
+	return &filterSource{reader: reader, groupRows: groupRows, fullMatches: append([]bool(nil), fullMatches...)}
 }
 
-func (s *parquetFilterSource) Schema() *arrow.Schema { return s.reader.Schema() }
+func (s *filterSource) Schema() *arrow.Schema { return s.reader.Schema() }
 
-func (s *parquetFilterSource) Next() bool {
+func (s *filterSource) Next() bool {
 	if !s.reader.Next() {
 		s.current = nil
 		return false
@@ -40,7 +36,7 @@ func (s *parquetFilterSource) Next() bool {
 	return true
 }
 
-func (s *parquetFilterSource) batchFullyMatches(rows int64) bool {
+func (s *filterSource) batchFullyMatches(rows int64) bool {
 	if rows == 0 || len(s.fullMatches) != len(s.groupRows) {
 		return false
 	}
@@ -66,7 +62,7 @@ func (s *parquetFilterSource) batchFullyMatches(rows int64) bool {
 	return remaining == 0 && fullyMatches
 }
 
-func (s *parquetFilterSource) RecordBatch() arrow.RecordBatch { return s.current }
-func (s *parquetFilterSource) Err() error                     { return s.reader.Err() }
-func (s *parquetFilterSource) Release()                       { s.reader.Release() }
-func (s *parquetFilterSource) FiltersFullyMatch() bool        { return s.fullyMatches }
+func (s *filterSource) RecordBatch() arrow.RecordBatch { return s.current }
+func (s *filterSource) Err() error                     { return s.reader.Err() }
+func (s *filterSource) Release()                       { s.reader.Release() }
+func (s *filterSource) FiltersFullyMatch() bool        { return s.fullyMatches }

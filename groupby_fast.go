@@ -6,6 +6,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
 type fastGroupBySpec struct {
@@ -78,10 +79,10 @@ func newFastInt64GroupBy(engine *Engine, schema *arrow.Schema, spec fastGroupByS
 	keyFields := schema.FieldIndices(spec.keyName)
 	valueFields := schema.FieldIndices(spec.valueName)
 	if len(keyFields) == 0 {
-		return nil, &ColumnNotFoundError{Name: spec.keyName, Available: schemaNames(schema)}
+		return nil, &ColumnNotFoundError{Name: spec.keyName, Available: arrowutil.SchemaNames(schema)}
 	}
 	if len(valueFields) == 0 {
-		return nil, &ColumnNotFoundError{Name: spec.valueName, Available: schemaNames(schema)}
+		return nil, &ColumnNotFoundError{Name: spec.valueName, Available: arrowutil.SchemaNames(schema)}
 	}
 	if schema.Field(keyFields[0]).Type.ID() != arrow.INT64 {
 		return nil, fmt.Errorf("golars: fast group-by requires an int64 key, got %s", schema.Field(keyFields[0]).Type)

@@ -1,4 +1,4 @@
-package golars
+package hive
 
 import (
 	"fmt"
@@ -9,12 +9,23 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/guywaldman/golars/internal/arrowutil"
 )
 
-func hivePartitionKeys(paths []string) []string {
+// Source is the batch-oriented reader contract decorated by partition fields.
+type Source interface {
+	Schema() *arrow.Schema
+	Next() bool
+	RecordBatch() arrow.RecordBatch
+	Err() error
+	Release()
+}
+
+// PartitionKeys returns the sorted union of Hive partition keys.
+func PartitionKeys(paths []string) []string {
 	seen := make(map[string]struct{})
 	for _, path := range paths {
-		for key := range hivePartitionValues(path, nil) {
+		for key := range PartitionValues(path, nil) {
 			seen[key] = struct{}{}
 		}
 	}
@@ -26,7 +37,8 @@ func hivePartitionKeys(paths []string) []string {
 	return keys
 }
 
-func hivePartitionValues(path string, keys []string) map[string]string {
+// PartitionValues extracts key=value path segments, optionally restricted to keys.
+func PartitionValues(path string, keys []string) map[string]string {
 	values := make(map[string]string)
 	parts := strings.FieldsFunc(filepath.ToSlash(path), func(r rune) bool { return r == '/' })
 	for index, part := range parts {
@@ -50,7 +62,7 @@ func hivePartitionValues(path string, keys []string) map[string]string {
 }
 
 type partitionSource struct {
-	base      recordSource
+	base      Source
 	values    map[string]string
 	allocator memory.Allocator
 	keys      []string
@@ -58,7 +70,8 @@ type partitionSource struct {
 	err       error
 }
 
-func newPartitionSource(base recordSource, values map[string]string, allocator memory.Allocator) recordSource {
+// NewPartitionSource decorates batches with constant partition columns.
+func NewPartitionSource(base Source, values map[string]string, allocator memory.Allocator) Source {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -66,6 +79,7 @@ func newPartitionSource(base recordSource, values map[string]string, allocator m
 	sort.Strings(keys)
 	return &partitionSource{base: base, values: values, allocator: allocator, keys: keys}
 }
+
 func (s *partitionSource) Schema() *arrow.Schema {
 	baseSchema := s.base.Schema()
 	if baseSchema == nil {
@@ -79,6 +93,7 @@ func (s *partitionSource) Schema() *arrow.Schema {
 	}
 	return arrow.NewSchema(fields, nil)
 }
+
 func (s *partitionSource) Next() bool {
 	if s.current != nil {
 		s.current.Release()
@@ -111,9 +126,10 @@ func (s *partitionSource) Next() bool {
 		fields = append(fields, arrow.Field{Name: key, Type: arrow.BinaryTypes.String, Nullable: false})
 	}
 	s.current = array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, raw.NumRows())
-	releaseArrays(columns)
+	arrowutil.ReleaseArrays(columns)
 	return true
 }
+
 func (s *partitionSource) RecordBatch() arrow.RecordBatch { return s.current }
 func (s *partitionSource) Err() error                     { return s.err }
 func (s *partitionSource) Release() {
@@ -127,7 +143,8 @@ func (s *partitionSource) Release() {
 	}
 }
 
-func validatePartitionNames(names []string) error {
+// ValidatePartitionNames validates public partition column names.
+func ValidatePartitionNames(names []string) error {
 	seen := map[string]struct{}{}
 	for _, name := range names {
 		if name == "" || strings.ContainsAny(name, `/\\=`) {

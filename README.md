@@ -55,11 +55,11 @@ Run the emulator suite on a machine with Docker:
 go test -tags=e2e ./... -count=1 -v
 ```
 
-The E2E tests skip when Docker is unavailable. Remote Parquet/IPC objects that
-do not expose the optional range interface are materialized before decoding.
-For a Docker-compatible runtime using a non-default socket, set `DOCKER_HOST`
-explicitly; for example, OrbStack on macOS uses
-`DOCKER_HOST=unix://${HOME}/.orbstack/run/docker.sock`.
+The E2E suite requires Docker and fails fast when Docker is unavailable. Remote
+Parquet/IPC objects that do not expose the optional range interface are
+materialized before decoding.
+The harness uses the Docker client configuration supplied by the environment;
+it does not select or auto-detect a container runtime.
 
 ## Streaming and predicate pruning
 
@@ -111,6 +111,21 @@ df, err := engine.ScanParquet("s3://bucket/events/*.parquet").Collect(ctx)
 The implementation is intentionally a fast-breaking v0 API. The execution
 kernel and format contracts are stable enough for experimentation, while the
 public type names and richer Polars parity surface will continue to grow.
+
+## Repository layout
+
+- The module root contains the public `golars` API plus the tightly coupled
+  logical-plan and execution kernels.
+- `internal/arrowutil` contains shared Arrow ownership and scalar helpers;
+  `internal/jsonio` handles JSON inference and encoding; `internal/ipcio`
+  handles Arrow IPC file readers.
+- `internal/parquetio` owns Parquet readers, row-group pruning, projection,
+  and ranged object reads; `internal/storage` owns S3/GCS adapters; and
+  `internal/hive` owns Hive partition enrichment.
+- `internal/storageuri` contains object-URI validation. These packages are
+  implementation boundaries and are not part of the public API.
+- `benchmarks` contains the Go/Rust comparison harness; `cmd` contains its
+  runnable utilities.
 
 ## Benchmarking
 
