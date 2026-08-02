@@ -41,6 +41,30 @@ func BenchmarkStringFilter(b *testing.B) {
 	benchmarkQuery(b, StringFilter)
 }
 
+func BenchmarkLimitPushdown(b *testing.B) {
+	benchmarkQuery(b, LimitPushdown)
+}
+
+func BenchmarkSortedTopK(b *testing.B) {
+	benchmarkQuery(b, SortedTopK)
+}
+
+func BenchmarkWindowAggregation(b *testing.B) {
+	benchmarkQuery(b, WindowAggregation)
+}
+
+func BenchmarkSelfJoin(b *testing.B) {
+	benchmarkQuery(b, SelfJoin)
+}
+
+func BenchmarkUniqueTenant(b *testing.B) {
+	benchmarkQuery(b, UniqueTenant)
+}
+
+func BenchmarkFullAggregation(b *testing.B) {
+	benchmarkQuery(b, FullAggregation)
+}
+
 func benchmarkQuery(b *testing.B, query Query) {
 	path := *benchmarkDataset
 	if path == "" {

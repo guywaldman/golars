@@ -351,7 +351,7 @@ func (g *simpleGroupBy) result() (*DataFrame, error) {
 		fields = append(fields, arrow.Field{Name: spec.output, Type: valueType, Nullable: true})
 	}
 	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns))
-	return &DataFrame{table: table, engine: g.engine}, nil
+	return newDataFrameWithTable(table, g.engine), nil
 }
 
 func executeSimpleGroupBy(ctx context.Context, base *LazyFrame, request scanRequest, spec simpleGroupBySpec) (*DataFrame, error) {

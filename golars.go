@@ -25,23 +25,38 @@ var (
 	ErrTypeMismatch   = core.ErrTypeMismatch
 	ErrInvalidPlan    = core.ErrInvalidPlan
 
-	Null        = core.Null
-	Boolean     = core.Boolean
-	Int8        = core.Int8
-	Int16       = core.Int16
-	Int32       = core.Int32
-	Int64       = core.Int64
-	Uint8       = core.Uint8
-	Uint16      = core.Uint16
-	Uint32      = core.Uint32
-	Uint64      = core.Uint64
-	Float32     = core.Float32
-	Float64     = core.Float64
-	String      = core.String
-	LargeString = core.LargeString
-	Binary      = core.Binary
-	Date32      = core.Date32
-	Date64      = core.Date64
+	Null                 = core.Null
+	Boolean              = core.Boolean
+	Int8                 = core.Int8
+	Int16                = core.Int16
+	Int32                = core.Int32
+	Int64                = core.Int64
+	Uint8                = core.Uint8
+	Uint16               = core.Uint16
+	Uint32               = core.Uint32
+	Uint64               = core.Uint64
+	UInt8                = core.UInt8
+	UInt16               = core.UInt16
+	UInt32               = core.UInt32
+	UInt64               = core.UInt64
+	Float32              = core.Float32
+	Float64              = core.Float64
+	Float16              = core.Float16
+	String               = core.String
+	LargeString          = core.LargeString
+	Binary               = core.Binary
+	LargeBinary          = core.LargeBinary
+	StringView           = core.StringView
+	BinaryView           = core.BinaryView
+	Date32               = core.Date32
+	Date64               = core.Date64
+	Date                 = core.Date
+	Utf8                 = core.Utf8
+	Categorical          = core.Categorical
+	Enum                 = core.Enum
+	IntervalMonth        = core.IntervalMonth
+	IntervalDayTime      = core.IntervalDayTime
+	IntervalMonthDayNano = core.IntervalMonthDayNano
 )
 
 type (
@@ -56,6 +71,9 @@ type (
 	Expr                = core.Expr
 	StrExpr             = core.StrExpr
 	DtExpr              = core.DtExpr
+	WhenThen            = core.WhenThen
+	JoinType            = core.JoinType
+	JoinOption          = core.JoinOption
 	Engine              = core.Engine
 	EngineOption        = core.EngineOption
 	ScanOption          = core.ScanOption
@@ -71,14 +89,46 @@ type (
 	ColumnNotFoundError = core.ColumnNotFoundError
 )
 
+const (
+	JoinInner = core.JoinInner
+	JoinLeft  = core.JoinLeft
+	JoinFull  = core.JoinFull
+	JoinRight = core.JoinRight
+	JoinSemi  = core.JoinSemi
+	JoinAnti  = core.JoinAnti
+	JoinCross = core.JoinCross
+)
+
 func Timestamp(unit arrow.TimeUnit, timezone string) DataType { return core.Timestamp(unit, timezone) }
+func Datetime(unit arrow.TimeUnit, timezone string) DataType  { return core.Datetime(unit, timezone) }
 func Duration(unit arrow.TimeUnit) DataType                   { return core.Duration(unit) }
+func Time32(unit arrow.TimeUnit) DataType                     { return core.Time32(unit) }
+func Time64(unit arrow.TimeUnit) DataType                     { return core.Time64(unit) }
+func Time(unit arrow.TimeUnit) DataType                       { return core.Time(unit) }
+func Decimal32(precision, scale int32) DataType               { return core.Decimal32(precision, scale) }
+func Decimal64(precision, scale int32) DataType               { return core.Decimal64(precision, scale) }
+func Decimal128(precision, scale int32) DataType              { return core.Decimal128(precision, scale) }
+func Decimal256(precision, scale int32) DataType              { return core.Decimal256(precision, scale) }
+func FixedSizeBinary(width int) DataType                      { return core.FixedSizeBinary(width) }
 func ListOf(elem DataType) DataType                           { return core.ListOf(elem) }
+func LargeListOf(elem DataType) DataType                      { return core.LargeListOf(elem) }
+func ListViewOf(elem DataType) DataType                       { return core.ListViewOf(elem) }
+func LargeListViewOf(elem DataType) DataType                  { return core.LargeListViewOf(elem) }
+func FixedSizeListOf(length int32, elem DataType) DataType    { return core.FixedSizeListOf(length, elem) }
 func StructOf(fields ...Field) DataType                       { return core.StructOf(fields...) }
 func MapOf(key, item DataType) DataType                       { return core.MapOf(key, item) }
-func DataTypeFromArrow(t arrow.DataType) DataType             { return core.DataTypeFromArrow(t) }
-func NewSchema(fields ...Field) Schema                        { return core.NewSchema(fields...) }
-func SchemaFromArrow(schema *arrow.Schema) Schema             { return core.SchemaFromArrow(schema) }
+func DictionaryOf(index, value DataType, ordered bool) DataType {
+	return core.DictionaryOf(index, value, ordered)
+}
+func RunEndEncodedOf(runEnds, values DataType) DataType {
+	return core.RunEndEncodedOf(runEnds, values)
+}
+func DataTypeFromArrow(t arrow.DataType) DataType { return core.DataTypeFromArrow(t) }
+func NewSchema(fields ...Field) Schema            { return core.NewSchema(fields...) }
+func NewSchemaWithMetadata(fields []Field, metadata arrow.Metadata) Schema {
+	return core.NewSchemaWithMetadata(fields, metadata)
+}
+func SchemaFromArrow(schema *arrow.Schema) Schema { return core.SchemaFromArrow(schema) }
 
 func NewSeries(name string, values any) (*Series, error) {
 	return core.NewSeries(name, values)
@@ -102,11 +152,24 @@ func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 func NewDataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 	return core.NewDataFrameFromArrow(table)
 }
+func DataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
+	return core.DataFrameFromRecordBatch(batch)
+}
+func NewDataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
+	return core.NewDataFrameFromRecordBatch(batch)
+}
+func DataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
+	return core.DataFrameFromRecordBatches(batches)
+}
+func NewDataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
+	return core.NewDataFrameFromRecordBatches(batches)
+}
 
-func Col(name string) Expr { return core.Col(name) }
-func Lit(value any) Expr   { return core.Lit(value) }
-func All() Expr            { return core.All() }
-func Count() Expr          { return core.Count() }
+func Col(name string) Expr         { return core.Col(name) }
+func Lit(value any) Expr           { return core.Lit(value) }
+func All() Expr                    { return core.All() }
+func Count() Expr                  { return core.Count() }
+func When(predicate Expr) WhenThen { return core.When(predicate) }
 
 func NewEngine(options ...EngineOption) (*Engine, error) {
 	return core.NewEngine(options...)
@@ -136,6 +199,8 @@ func WithWriteDelimiter(delimiter rune) WriteOption {
 func WithWriteBatchSize(rows int64) WriteOption {
 	return core.WithWriteBatchSize(rows)
 }
+func WithJoinType(how JoinType) JoinOption    { return core.WithJoinType(how) }
+func WithJoinSuffix(suffix string) JoinOption { return core.WithJoinSuffix(suffix) }
 
 func WithPartitionBy(columns ...string) DatasetWriteOption {
 	return core.WithPartitionBy(columns...)

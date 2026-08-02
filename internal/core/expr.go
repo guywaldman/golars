@@ -21,6 +21,7 @@ type exprNode struct {
 	name       string
 	value      any
 	args       []*exprNode
+	windowKeys []*exprNode
 	dtype      DataType
 	distinct   bool
 	descending bool
@@ -72,6 +73,26 @@ func (e Expr) Cast(dtype DataType) Expr {
 	return Expr{&exprNode{kind: exprCast, dtype: dtype, args: []*exprNode{e.node}}}
 }
 
+// Over evaluates an expression independently for each partition. Aggregate
+// expressions (for example Col("value").Sum().Over(Col("group"))) return one
+// value per input row, matching the shape of the input frame.
+func (e Expr) Over(partitionBy ...Expr) Expr {
+	if e.node == nil {
+		return e
+	}
+	copy := *e.node
+	copy.windowKeys = make([]*exprNode, len(partitionBy))
+	for i, key := range partitionBy {
+		copy.windowKeys[i] = cloneExprNode(key.node)
+	}
+	return Expr{node: &copy}
+}
+
+func (e Expr) Rank() Expr      { return e.unary("rank") }
+func (e Expr) DenseRank() Expr { return e.unary("dense_rank") }
+func (e Expr) RowNumber() Expr { return e.unary("row_number") }
+func (e Expr) CumSum() Expr    { return e.unary("cum_sum") }
+
 func (e Expr) aggregate(name string) Expr {
 	return Expr{&exprNode{kind: exprAggregate, name: name, args: []*exprNode{e.node}}}
 }
@@ -107,6 +128,29 @@ func (d DtExpr) Month() Expr { return d.expr.unary("dt_month") }
 func (d DtExpr) Day() Expr   { return d.expr.unary("dt_day") }
 
 func Count() Expr { return Expr{&exprNode{kind: exprAggregate, name: "count_rows"}} }
+
+type WhenThen struct {
+	predicate Expr
+	value     Expr
+}
+
+func When(predicate Expr) WhenThen { return WhenThen{predicate: predicate} }
+func (w WhenThen) Then(value Expr) WhenThen {
+	w.value = value
+	return w
+}
+func (w WhenThen) Otherwise(value Expr) Expr {
+	return Expr{node: &exprNode{kind: exprCall, name: "when_then", args: []*exprNode{w.predicate.node, w.value.node, value.node}}}
+}
+
+func (e Expr) IsIn(values Expr) Expr { return e.binary("is_in", values) }
+func (e Expr) IsBetween(lower, upper Expr) Expr {
+	return Expr{node: &exprNode{kind: exprCall, name: "is_between", args: []*exprNode{e.node, lower.node, upper.node}}}
+}
+func (e Expr) IsNaN() Expr      { return e.unary("is_nan") }
+func (e Expr) IsNotNaN() Expr   { return e.unary("is_not_nan") }
+func (e Expr) IsFinite() Expr   { return e.unary("is_finite") }
+func (e Expr) IsInfinite() Expr { return e.unary("is_infinite") }
 
 func (e Expr) IsValid() bool { return e.node != nil }
 

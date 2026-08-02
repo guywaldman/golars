@@ -19,6 +19,9 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 	if node == nil {
 		return nil, fmt.Errorf("%w: nil expression", ErrInvalidPlan)
 	}
+	if len(node.windowKeys) != 0 {
+		return evalWindowExpr(ctx, engine, node, batch)
+	}
 	switch node.kind {
 	case exprColumn:
 		indices := batch.Schema().FieldIndices(node.name)
@@ -43,6 +46,12 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 		if node.name == "all_columns" {
 			return nil, fmt.Errorf("%w: all() is only valid in Select", ErrInvalidPlan)
 		}
+		if node.name == "when_then" {
+			return evalWhenThen(ctx, engine, node, batch)
+		}
+		if node.name == "is_in" || node.name == "is_between" || node.name == "is_nan" || node.name == "is_not_nan" || node.name == "is_finite" || node.name == "is_infinite" {
+			return evalPredicateExpr(ctx, engine, node, batch)
+		}
 		args := make([]arrow.Array, len(node.args))
 		for i, arg := range node.args {
 			arr, err := evalExpr(ctx, engine, arg, batch)
@@ -53,6 +62,15 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 			args[i] = arr
 		}
 		defer arrowutil.ReleaseArrays(args)
+		if len(args) == 2 && coercibleCall(node.name) {
+			left, right, coerceErr := coerceArrayPair(ctx, engine.allocator, args[0], args[1])
+			if coerceErr != nil {
+				return nil, coerceErr
+			}
+			args[0].Release()
+			args[1].Release()
+			args[0], args[1] = left, right
+		}
 		if node.name == "coalesce" {
 			return coalesceArrays(args[0], args[1], engine.allocator)
 		}
@@ -87,6 +105,16 @@ func evalExpr(ctx context.Context, engine *Engine, node *exprNode, batch arrow.R
 		return nil, fmt.Errorf("%w: aggregate %s outside GroupBy", ErrInvalidPlan, node.name)
 	default:
 		return nil, fmt.Errorf("%w: unknown expression", ErrInvalidPlan)
+	}
+}
+
+func coercibleCall(name string) bool {
+	switch name {
+	case "equal", "not_equal", "greater", "greater_equal", "less", "less_equal",
+		"add", "subtract", "multiply", "divide", "coalesce":
+		return true
+	default:
+		return false
 	}
 }
 

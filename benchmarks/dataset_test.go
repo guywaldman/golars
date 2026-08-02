@@ -35,6 +35,12 @@ func TestWriteDatasetAndExecute(t *testing.T) {
 		{GroupedAggregation, 2, 128},
 		{MultiAggregation, 4, 32},
 		{StringFilter, 3, countPayloadPrefix(rows)},
+		{LimitPushdown, 2, 1_000},
+		{SortedTopK, 3, 100},
+		{WindowAggregation, 3, rows - cutoff},
+		{SelfJoin, 6, selfJoinRows(2_000, cutoff)},
+		{UniqueTenant, 3, 32},
+		{FullAggregation, 4, 32},
 	}
 	for _, test := range tests {
 		result, err := Execute(context.Background(), engine, path, test.query, cutoff)
@@ -51,6 +57,10 @@ func TestWriteDatasetAndExecute(t *testing.T) {
 	checkDerivedProjection(t, ExecuteOrFatal(t, engine, path, DerivedProjection, cutoff), cutoff)
 	checkGroupedAggregation(t, ExecuteOrFatal(t, engine, path, GroupedAggregation, cutoff), rows, cutoff)
 	checkMultiAggregation(t, ExecuteOrFatal(t, engine, path, MultiAggregation, cutoff), rows, cutoff)
+	checkSortedTopK(t, ExecuteOrFatal(t, engine, path, SortedTopK, cutoff))
+	checkWindowAggregation(t, ExecuteOrFatal(t, engine, path, WindowAggregation, cutoff), rows, cutoff)
+	checkUniqueTenant(t, ExecuteOrFatal(t, engine, path, UniqueTenant, cutoff))
+	checkMultiAggregation(t, ExecuteOrFatal(t, engine, path, FullAggregation, cutoff), rows, 0)
 }
 
 func ExecuteOrFatal(t *testing.T, engine *golars.Engine, path string, query Query, cutoff int64) *golars.DataFrame {
@@ -129,6 +139,56 @@ func checkMultiAggregation(t *testing.T, result *golars.DataFrame, rows, cutoff 
 	}
 }
 
+func checkSortedTopK(t *testing.T, result *golars.DataFrame) {
+	t.Helper()
+	defer result.Close()
+	values := float64Values(t, result, "value")
+	if len(values) != 100 {
+		t.Fatalf("top-k length=%d, want 100", len(values))
+	}
+	for i := 1; i < len(values); i++ {
+		if values[i] > values[i-1] {
+			t.Fatalf("top-k values are not descending at %d: %v then %v", i, values[i-1], values[i])
+		}
+	}
+}
+
+func checkWindowAggregation(t *testing.T, result *golars.DataFrame, rows, cutoff int64) {
+	t.Helper()
+	defer result.Close()
+	tenants := stringValues(t, result, "tenant")
+	values := float64Values(t, result, "value")
+	totals := float64Values(t, result, "tenant_total")
+	if len(tenants) != int(rows-cutoff) || len(values) != len(tenants) || len(totals) != len(tenants) {
+		t.Fatalf("window lengths=(%d,%d,%d), want %d", len(tenants), len(values), len(totals), rows-cutoff)
+	}
+	want := make(map[string]float64, 32)
+	for row := cutoff; row < rows; row++ {
+		want[fmt.Sprintf("tenant-%02d", row%32)] += float64(row%10_000) / 10
+	}
+	for i, tenant := range tenants {
+		if math.Abs(totals[i]-want[tenant]) > 1e-9 {
+			t.Fatalf("tenant %s window total=%v, want %v", tenant, totals[i], want[tenant])
+		}
+	}
+}
+
+func checkUniqueTenant(t *testing.T, result *golars.DataFrame) {
+	t.Helper()
+	defer result.Close()
+	tenants := stringValues(t, result, "tenant")
+	if len(tenants) != 32 {
+		t.Fatalf("unique tenant count=%d, want 32", len(tenants))
+	}
+	seen := make(map[string]struct{}, len(tenants))
+	for _, tenant := range tenants {
+		if _, exists := seen[tenant]; exists {
+			t.Fatalf("tenant %q appears more than once", tenant)
+		}
+		seen[tenant] = struct{}{}
+	}
+}
+
 func countTenantRows(rows, cutoff, tenant int64) int64 {
 	var count int64
 	for row := cutoff; row < rows; row++ {
@@ -147,6 +207,19 @@ func countPayloadPrefix(rows int64) int64 {
 		}
 	}
 	return count
+}
+
+func selfJoinRows(limit, cutoff int64) int64 {
+	var left, right [32]int64
+	for row := int64(0); row < limit; row++ {
+		left[row%32]++
+		right[(cutoff+row)%32]++
+	}
+	var rows int64
+	for tenant := range left {
+		rows += left[tenant] * right[tenant]
+	}
+	return rows
 }
 
 func int64Values(t *testing.T, df *golars.DataFrame, name string) []int64 {

@@ -40,6 +40,8 @@ func formatForPath(path string) (formatKind, bool) {
 		return formatJSON, true
 	case strings.HasSuffix(lower, ".arrow"), strings.HasSuffix(lower, ".feather"):
 		return formatIPCFile, true
+	case strings.HasSuffix(lower, ".arrows"):
+		return formatIPCStream, true
 	default:
 		return 0, false
 	}

@@ -13,6 +13,12 @@ enum Query {
     GroupedAggregation,
     MultiAggregation,
     StringFilter,
+    LimitPushdown,
+    SortedTopK,
+    WindowAggregation,
+    SelfJoin,
+    UniqueTenant,
+    FullAggregation,
 }
 
 impl Query {
@@ -25,6 +31,12 @@ impl Query {
             "grouped_aggregation" => Ok(Self::GroupedAggregation),
             "multi_aggregation" => Ok(Self::MultiAggregation),
             "string_filter" => Ok(Self::StringFilter),
+            "limit_pushdown" => Ok(Self::LimitPushdown),
+            "sorted_topk" => Ok(Self::SortedTopK),
+            "window_aggregation" => Ok(Self::WindowAggregation),
+            "self_join" => Ok(Self::SelfJoin),
+            "unique_tenant" => Ok(Self::UniqueTenant),
+            "full_aggregation" => Ok(Self::FullAggregation),
             _ => Err(format!("unknown query {value:?}")),
         }
     }
@@ -38,25 +50,32 @@ impl Query {
             Self::GroupedAggregation => "grouped_aggregation",
             Self::MultiAggregation => "multi_aggregation",
             Self::StringFilter => "string_filter",
+            Self::LimitPushdown => "limit_pushdown",
+            Self::SortedTopK => "sorted_topk",
+            Self::WindowAggregation => "window_aggregation",
+            Self::SelfJoin => "self_join",
+            Self::UniqueTenant => "unique_tenant",
+            Self::FullAggregation => "full_aggregation",
         }
     }
 }
 
+fn scan(path: &str) -> PolarsResult<LazyFrame> {
+    LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())
+}
+
 fn execute(path: &str, query: Query, cutoff: i64) -> PolarsResult<DataFrame> {
-    let scan = LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
-        .filter(col("id").gt_eq(lit(cutoff)));
+    let filtered = scan(path)?.filter(col("id").gt_eq(lit(cutoff)));
     match query {
-        Query::ProjectionOnly => {
-            LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
-                .select([col("group_id"), col("value"), col("payload")])
-                .collect()
-        }
-        Query::FilterSelect => scan.select([col("group_id"), col("value")]).collect(),
-        Query::CompoundFilter => scan
+        Query::ProjectionOnly => scan(path)?
+            .select([col("group_id"), col("value"), col("payload")])
+            .collect(),
+        Query::FilterSelect => filtered.select([col("group_id"), col("value")]).collect(),
+        Query::CompoundFilter => filtered
             .filter(col("tenant").eq(lit("tenant-07")))
             .select([col("tenant"), col("group_id"), col("value")])
             .collect(),
-        Query::DerivedProjection => scan
+        Query::DerivedProjection => filtered
             .with_columns([
                 col("value")
                     .mul(col("quantity").cast(DataType::Float64))
@@ -65,11 +84,11 @@ fn execute(path: &str, query: Query, cutoff: i64) -> PolarsResult<DataFrame> {
             ])
             .select([col("tenant"), col("revenue"), col("payload_len")])
             .collect(),
-        Query::GroupedAggregation => scan
+        Query::GroupedAggregation => filtered
             .group_by([col("group_id")])
             .agg([col("value").sum().alias("total")])
             .collect(),
-        Query::MultiAggregation => scan
+        Query::MultiAggregation => filtered
             .group_by([col("tenant")])
             .agg([
                 col("value").sum().alias("value_sum"),
@@ -77,12 +96,58 @@ fn execute(path: &str, query: Query, cutoff: i64) -> PolarsResult<DataFrame> {
                 col("value").count().alias("value_count"),
             ])
             .collect(),
-        Query::StringFilter => {
-            LazyFrame::scan_parquet(PlPath::new(path), ScanArgsParquet::default())?
-                .filter(col("payload").str().starts_with(lit("payload-00")))
-                .select([col("tenant"), col("payload"), col("value")])
-                .collect()
+        Query::StringFilter => scan(path)?
+            .filter(col("payload").str().starts_with(lit("payload-00")))
+            .select([col("tenant"), col("payload"), col("value")])
+            .collect(),
+        Query::LimitPushdown => filtered
+            .select([col("group_id"), col("value")])
+            .limit(1_000)
+            .collect(),
+        Query::SortedTopK => filtered
+            .select([col("id"), col("tenant"), col("value")])
+            .sort(
+                ["value"],
+                SortMultipleOptions::new().with_order_descending(true),
+            )
+            .limit(100)
+            .collect(),
+        Query::WindowAggregation => filtered
+            .with_columns([col("value")
+                .sum()
+                .over([col("tenant")])
+                .alias("tenant_total")])
+            .select([col("tenant"), col("value"), col("tenant_total")])
+            .collect(),
+        Query::SelfJoin => {
+            let left = scan(path)?
+                .filter(col("id").lt(lit(cutoff)))
+                .select([col("tenant"), col("group_id"), col("value")])
+                .limit(2_000);
+            let right = scan(path)?
+                .filter(col("id").gt_eq(lit(cutoff)))
+                .select([col("tenant"), col("group_id"), col("quantity")])
+                .limit(2_000);
+            left.join(
+                right,
+                [col("tenant")],
+                [col("tenant")],
+                JoinArgs::new(JoinType::Inner).with_coalesce(JoinCoalesce::KeepColumns),
+            )
+            .collect()
         }
+        Query::UniqueTenant => scan(path)?
+            .select([col("tenant"), col("group_id"), col("value")])
+            .unique_stable(col("tenant").into_selector(), UniqueKeepStrategy::First)
+            .collect(),
+        Query::FullAggregation => scan(path)?
+            .group_by([col("tenant")])
+            .agg([
+                col("value").sum().alias("value_sum"),
+                col("value").mean().alias("value_mean"),
+                col("value").count().alias("value_count"),
+            ])
+            .collect(),
     }
 }
 
@@ -134,22 +199,32 @@ fn main() -> Result<(), String> {
     for _ in 0..warmup {
         execute(&path, query, cutoff).map_err(|err| err.to_string())?;
     }
+    let rss_before = max_rss_bytes();
     let started = Instant::now();
     let mut rows = 0_u64;
+    let mut width = 0_usize;
     for _ in 0..iterations {
         let frame = execute(&path, query, cutoff).map_err(|err| err.to_string())?;
         rows += frame.height() as u64;
+        if width == 0 {
+            width = frame.width();
+        } else if width != frame.width() {
+            return Err("query returned inconsistent widths".to_string());
+        }
     }
     let elapsed_ns = started.elapsed().as_nanos() as u64;
     let avg_ns = elapsed_ns / iterations as u64;
+    let max_rss = max_rss_bytes();
     println!(
-        "{{\"implementation\":\"polars\",\"query\":\"{}\",\"iterations\":{},\"rows\":{},\"elapsed_ns\":{},\"avg_ns\":{},\"max_rss_bytes\":{}}}",
+        "{{\"implementation\":\"polars\",\"query\":\"{}\",\"iterations\":{},\"rows\":{},\"width\":{},\"elapsed_ns\":{},\"avg_ns\":{},\"max_rss_bytes\":{},\"rss_delta_bytes\":{}}}",
         query.name(),
         iterations,
         rows / iterations as u64,
+        width,
         elapsed_ns,
         avg_ns,
-        max_rss_bytes(),
+        max_rss,
+        max_rss.saturating_sub(rss_before),
     );
     Ok(())
 }

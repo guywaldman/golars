@@ -264,7 +264,7 @@ func (g *fastInt64GroupBy) result() (*DataFrame, error) {
 		{Name: g.spec.aggOutput, Type: valueArray.DataType(), Nullable: true},
 	}
 	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), [][]arrow.Array{{keyArray}, {valueArray}})
-	return &DataFrame{table: table, engine: g.engine}, nil
+	return newDataFrameWithTable(table, g.engine), nil
 }
 
 func executeFastGroupBy(ctx context.Context, base *LazyFrame, request scanRequest, spec fastGroupBySpec) (*DataFrame, error) {

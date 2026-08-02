@@ -228,7 +228,7 @@ func executeGroupBy(ctx context.Context, df *DataFrame, keys, exprs []Expr) (*Da
 	}
 	defer arrowutil.ReleaseArrays(columns)
 	table := array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns))
-	return &DataFrame{table: table, engine: df.engine}, nil
+	return newDataFrameWithTable(table, df.engine), nil
 }
 
 func unwrapAlias(node *exprNode) *exprNode {

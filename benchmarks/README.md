@@ -17,10 +17,14 @@ generated input. The workload names are:
   count together, exercising the general aggregation path.
 - `string_filter` applies a non-pushdown string prefix predicate and projects
   three columns.
-
-The Go API does not expose window expressions yet, so windows are intentionally
-not included in this cross-language suite. Adding a Rust-only window case would
-not be an apples-to-apples comparison.
+- `limit_pushdown` stops after a small filtered result, exercising limit
+  propagation through projection and scan batches.
+- `sorted_topk` filters, sorts by a scan column, and keeps the first 100 rows,
+  exposing top-k and materialization gaps.
+- `window_aggregation` computes a partitioned sum over the filtered rows.
+- `self_join` joins two bounded slices of the same input on the tenant key.
+- `unique_tenant` deduplicates a projected string key.
+- `full_aggregation` groups the complete input without a selective filter.
 
 Generate one input file, then run each implementation in separate processes:
 
@@ -44,11 +48,14 @@ cargo run --release \
 
 Repeat both runner commands with each workload name above. Each emits one JSON
 record containing elapsed time, rows, and peak resident set size. The Go runner
-also reports runtime heap and allocation counters; standard Go
+also reports runtime heap deltas and allocation counters; standard Go
 `-benchmem` reports allocations per operation. The timed Rust path uses its
 normal allocator so the performance result is not perturbed by memory
 instrumentation. Compare values on the same machine, CPU, runtime versions,
 input file, thread count, and warmup/iteration settings.
+The `rows` field must agree between implementations before timings are
+interpreted; the Go benchmark tests also check exact shapes and aggregation
+values.
 
 For standard Go allocation reports, run:
 

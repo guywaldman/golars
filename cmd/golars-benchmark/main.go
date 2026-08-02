@@ -18,11 +18,15 @@ type result struct {
 	Query           string `json:"query"`
 	Iterations      int    `json:"iterations"`
 	Rows            int64  `json:"rows"`
+	Width           int    `json:"width"`
 	ElapsedNS       int64  `json:"elapsed_ns"`
 	AvgNS           int64  `json:"avg_ns"`
 	TotalAllocBytes uint64 `json:"total_alloc_bytes"`
+	AllocBytesPerOp uint64 `json:"alloc_bytes_per_op"`
 	PeakHeapBytes   uint64 `json:"peak_heap_bytes"`
+	PeakHeapDelta   uint64 `json:"peak_heap_delta_bytes"`
 	MaxRSSBytes     uint64 `json:"max_rss_bytes"`
+	RSSDeltaBytes   uint64 `json:"rss_delta_bytes"`
 }
 
 func main() {
@@ -63,10 +67,12 @@ func main() {
 		df.Close()
 	}
 	runtime.GC()
+	rssBefore := maxRSSBytes()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 	var total time.Duration
 	var rows int64
+	var width int
 	var peakHeap uint64 = before.HeapAlloc
 	for i := 0; i < *iterations; i++ {
 		started := time.Now()
@@ -76,6 +82,11 @@ func main() {
 		}
 		total += time.Since(started)
 		rows += df.Height()
+		if width == 0 {
+			width = df.Width()
+		} else if width != df.Width() {
+			fatal(fmt.Errorf("query returned inconsistent widths: %d and %d", width, df.Width()))
+		}
 		df.Close()
 		var sample runtime.MemStats
 		runtime.ReadMemStats(&sample)
@@ -90,12 +101,16 @@ func main() {
 		Query:           string(query),
 		Iterations:      *iterations,
 		Rows:            rows / int64(*iterations),
+		Width:           width,
 		ElapsedNS:       total.Nanoseconds(),
 		AvgNS:           total.Nanoseconds() / int64(*iterations),
 		TotalAllocBytes: after.TotalAlloc - before.TotalAlloc,
+		AllocBytesPerOp: (after.TotalAlloc - before.TotalAlloc) / uint64(*iterations),
 		PeakHeapBytes:   peakHeap,
+		PeakHeapDelta:   peakHeap - before.HeapAlloc,
 		MaxRSSBytes:     maxRSSBytes(),
 	}
+	output.RSSDeltaBytes = output.MaxRSSBytes - rssBefore
 	encoded, err := json.Marshal(output)
 	if err != nil {
 		fatal(err)

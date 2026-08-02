@@ -47,7 +47,7 @@ func (e *Engine) scanFormat(path string, format formatKind, options ...ScanOptio
 
 func newScanLazyFrameWithEngine(engine *Engine, path string, format formatKind, config scanConfig) *LazyFrame {
 	factory := func(ctx context.Context, engine *Engine) (recordSource, error) {
-		paths, err := expandPathsForEngine(ctx, engine, path)
+		paths, err := expandPathsForEngine(ctx, engine, path, format)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +117,7 @@ func expandPaths(ctx context.Context, path string) ([]string, error) {
 	return []string{path}, nil
 }
 
-func expandPathsForEngine(ctx context.Context, engine *Engine, path string) ([]string, error) {
+func expandPathsForEngine(ctx context.Context, engine *Engine, path string, format formatKind) ([]string, error) {
 	if scheme := storageuri.Scheme(path); scheme != "" {
 		store, ok := engine.ObjectStore(scheme)
 		if !ok {
@@ -125,7 +125,54 @@ func expandPathsForEngine(ctx context.Context, engine *Engine, path string) ([]s
 		}
 		return store.Glob(ctx, path)
 	}
-	return expandPaths(ctx, path)
+	return expandPathsForFormat(ctx, path, format)
+}
+
+func expandPathsForFormat(ctx context.Context, path string, format formatKind) ([]string, error) {
+	if strings.ContainsAny(path, "*?[") {
+		return expandPaths(ctx, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return []string{path}, nil
+	}
+	extension := formatExtension(format)
+	var paths []string
+	err = filepath.WalkDir(path, func(candidate string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(candidate), extension) {
+			return nil
+		}
+		paths = append(paths, candidate)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("golars: no %s files found under %q", extension, path)
+	}
+	return paths, nil
+}
+
+func formatExtension(format formatKind) string {
+	switch format {
+	case formatCSV:
+		return ".csv"
+	case formatNDJSON:
+		return ".ndjson"
+	case formatJSON:
+		return ".json"
+	case formatIPCFile:
+		return ".arrow"
+	case formatIPCStream:
+		return ".arrows"
+	default:
+		return ".parquet"
+	}
 }
 
 type fileSource struct {
@@ -279,7 +326,10 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 }
 
 func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, format formatKind, config scanConfig, request scanRequest) (recordSource, error) {
-	if format == formatParquet || format == formatIPCFile {
+	if format == formatParquet {
+		return parquetio.OpenReader(ctx, file, parquetConfig(engine, config), parquetRequest(request))
+	}
+	if format == formatIPCFile {
 		data, err := io.ReadAll(file)
 		if err != nil {
 			_ = file.Close()

@@ -16,16 +16,30 @@ result, err := golars.ScanParquet("s3://analytics/events/*.parquet").
 quota, batch size, parallelism, or object-store registration; ordinary code
 uses the immutable package default engine and does not manage a session.
 
+Arrow buffers are reference-counted. `DataFrame`, `Series`, and `LazyFrame`
+therefore expose `Close` for deterministic release, with `Release` as an Arrow
+style alias. A finalizer is installed as a safety net, but it is not a prompt
+memory-management mechanism; use `defer value.Close()` for large or
+long-lived values. Lazy branches retain their own table references, so closing
+one branch does not invalidate another.
+
 ## Current surface
 
 - Arrow-backed `DataFrame` and `Series`, with retained Arrow interop.
 - Eager and lazy `Select`, `Filter`, `WithColumns`, `Limit`/`Head`, `Sort`,
-  `GroupBy(...).Agg(...)`, `Drop`, `Rename`, and `DropNulls`.
+  `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,
+  `Unnest`, `Drop`, `Rename`, and `DropNulls`.
 - Expression trees with arithmetic, comparisons, boolean logic, null handling,
-  casts, aggregates, descending sort, and common string kernels.
+  casts, aggregates, conditional expressions, partitioned windows, descending
+  sort, membership/range predicates, and common string/date kernels.
+- Arrow type descriptors cover primitive, temporal, decimal, dictionary
+  (categorical/enum), nested list/struct/map, fixed-size, view, interval, and
+  run-end encoded types. `DataFrame`/`Series` constructors accept Arrow arrays,
+  chunked arrays, tables, and record batches without a copy at the boundary.
 - Lazy scans and eager reads for Parquet, CSV, NDJSON, JSON arrays, and Arrow
   IPC file/stream formats.
-- Sinks for the same formats, with non-overwriting local-file defaults.
+- Lazy and eager sinks for the same formats, with non-overwriting local-file
+  defaults. `LazyFrame.Sink` selects the writer from the destination extension.
 - Local globbing and Hive-style Parquet partition discovery.
 - Hive dataset writes with `Create`/`Append`, partition columns,
   `_SUCCESS`, and `_golars_schema.json`.
@@ -39,6 +53,10 @@ uses the immutable package default engine and does not manage a session.
 - Lazy scans derive the columns required by a terminal projection and its
   filters. Parquet reads only those Arrow columns; CSV and JSON readers apply
   the same projection at ingestion.
+- The optimized logical plan performs expression simplification, projection
+  collapse, predicate pushdown through safe projections, adjacent-filter
+  fusion, limit fusion/pushdown, type coercion, and storage predicate/projection
+  pushdown. `ExplainUnoptimized` and `ExplainOptimized` expose both forms.
 - Build-tagged end-to-end tests exercise Parquet write, object listing, remote
   reads, and lazy execution against LocalStack S3 and fake-gcs-server through
   Testcontainers.

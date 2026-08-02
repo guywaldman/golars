@@ -12,6 +12,8 @@ import (
 func applySelect(ctx context.Context, engine *Engine, batch arrow.RecordBatch, exprs []Expr) (arrow.RecordBatch, int64, error) {
 	columns := make([]arrow.Array, 0, len(exprs))
 	fields := make([]arrow.Field, 0, len(exprs))
+	cache := make(map[string]arrow.Array, len(exprs))
+	defer func() { arrowutil.ReleaseArrays(mapArrays(cache)) }()
 	for _, expr := range exprs {
 		if expr.node != nil && expr.node.kind == exprCall && expr.node.name == "all_columns" {
 			for i := 0; i < int(batch.NumCols()); i++ {
@@ -22,10 +24,19 @@ func applySelect(ctx context.Context, engine *Engine, batch arrow.RecordBatch, e
 			}
 			continue
 		}
-		col, err := evalExpr(ctx, engine, expr.node, batch)
-		if err != nil {
-			arrowutil.ReleaseArrays(columns)
-			return nil, 0, err
+		key := expr.String()
+		col := cache[key]
+		if col == nil {
+			var err error
+			col, err = evalExpr(ctx, engine, expr.node, batch)
+			if err != nil {
+				arrowutil.ReleaseArrays(columns)
+				return nil, 0, err
+			}
+			col.Retain()
+			cache[key] = col
+		} else {
+			col.Retain()
 		}
 		columns = append(columns, col)
 		fields = append(fields, arrow.Field{Name: expr.outputName(), Type: col.DataType(), Nullable: true})
@@ -44,11 +55,22 @@ func applyWithColumns(ctx context.Context, engine *Engine, batch arrow.RecordBat
 		columns[i].Retain()
 		fields[i] = batch.Schema().Field(i)
 	}
+	cache := make(map[string]arrow.Array, len(exprs))
+	defer func() { arrowutil.ReleaseArrays(mapArrays(cache)) }()
 	for _, expr := range exprs {
-		col, err := evalExpr(ctx, engine, expr.node, batch)
-		if err != nil {
-			arrowutil.ReleaseArrays(columns)
-			return nil, 0, err
+		key := expr.String()
+		col := cache[key]
+		if col == nil {
+			var err error
+			col, err = evalExpr(ctx, engine, expr.node, batch)
+			if err != nil {
+				arrowutil.ReleaseArrays(columns)
+				return nil, 0, err
+			}
+			col.Retain()
+			cache[key] = col
+		} else {
+			col.Retain()
 		}
 		name := expr.outputName()
 		indices := arrowutil.FieldIndices(fields, name)
@@ -64,4 +86,12 @@ func applyWithColumns(ctx context.Context, engine *Engine, batch arrow.RecordBat
 	out := array.NewRecordBatch(arrow.NewSchema(fields, nil), columns, batch.NumRows())
 	arrowutil.ReleaseArrays(columns)
 	return out, math.MaxInt64, nil
+}
+
+func mapArrays(values map[string]arrow.Array) []arrow.Array {
+	result := make([]arrow.Array, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
 }

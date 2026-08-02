@@ -12,22 +12,19 @@ import (
 )
 
 func sortDataFrame(ctx context.Context, df *DataFrame, exprs []Expr) (*DataFrame, error) {
-	reader := array.NewTableReader(df.table, df.table.NumRows())
-	defer reader.Release()
-	if !reader.Next() {
-		if err := reader.Err(); err != nil {
-			return nil, err
-		}
-		return DataFrameFromArrow(df.table)
+	batch, reader, err := wholeTableBatch(df.table, df.engine)
+	if err != nil {
+		return nil, err
 	}
-	batch := reader.RecordBatch()
+	defer reader.Release()
+	defer batch.Release()
 	result, _, err := applySort(ctx, df.engine, batch, exprs)
 	if err != nil {
 		return nil, err
 	}
 	defer result.Release()
 	table := array.NewTableFromRecords(result.Schema(), []arrow.RecordBatch{result})
-	return &DataFrame{table: table, engine: df.engine}, nil
+	return newDataFrameWithTable(table, df.engine), nil
 }
 
 func applySort(ctx context.Context, engine *Engine, batch arrow.RecordBatch, exprs []Expr) (arrow.RecordBatch, int64, error) {

@@ -26,12 +26,19 @@ const (
 	GroupedAggregation Query = "grouped_aggregation"
 	MultiAggregation   Query = "multi_aggregation"
 	StringFilter       Query = "string_filter"
+	LimitPushdown      Query = "limit_pushdown"
+	SortedTopK         Query = "sorted_topk"
+	WindowAggregation  Query = "window_aggregation"
+	SelfJoin           Query = "self_join"
+	UniqueTenant       Query = "unique_tenant"
+	FullAggregation    Query = "full_aggregation"
 )
 
 func (q Query) Valid() bool {
 	switch q {
 	case ProjectionOnly, FilterSelect, CompoundFilter, DerivedProjection,
-		GroupedAggregation, MultiAggregation, StringFilter:
+		GroupedAggregation, MultiAggregation, StringFilter, LimitPushdown,
+		SortedTopK, WindowAggregation, SelfJoin, UniqueTenant, FullAggregation:
 		return true
 	default:
 		return false
@@ -148,49 +155,91 @@ func Execute(ctx context.Context, engine *golars.Engine, path string, query Quer
 	}
 	switch query {
 	case ProjectionOnly:
-		return engine.ScanParquet(path).
-			Select(golars.Col("group_id"), golars.Col("value"), golars.Col("payload")).
-			Collect(ctx)
+		return collect(ctx, engine.ScanParquet(path).
+			Select(golars.Col("group_id"), golars.Col("value"), golars.Col("payload")))
 	case FilterSelect:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
-			Select(golars.Col("group_id"), golars.Col("value")).
-			Collect(ctx)
+			Select(golars.Col("group_id"), golars.Col("value")))
 	case CompoundFilter:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("id").Ge(golars.Lit(cutoff)).And(golars.Col("tenant").Eq(golars.Lit("tenant-07")))).
-			Select(golars.Col("tenant"), golars.Col("group_id"), golars.Col("value")).
-			Collect(ctx)
+			Select(golars.Col("tenant"), golars.Col("group_id"), golars.Col("value")))
 	case DerivedProjection:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
 			WithColumns(
 				golars.Col("value").Mul(golars.Col("quantity").Cast(golars.Float64)).Alias("revenue"),
 				golars.Col("payload").Str().Lengths().Alias("payload_len"),
 			).
-			Select(golars.Col("tenant"), golars.Col("revenue"), golars.Col("payload_len")).
-			Collect(ctx)
+			Select(golars.Col("tenant"), golars.Col("revenue"), golars.Col("payload_len")))
 	case GroupedAggregation:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
 			GroupBy(golars.Col("group_id")).
-			Agg(golars.Col("value").Sum().Alias("total")).
-			Collect(ctx)
+			Agg(golars.Col("value").Sum().Alias("total")))
 	case MultiAggregation:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
 			GroupBy(golars.Col("tenant")).
 			Agg(
 				golars.Col("value").Sum().Alias("value_sum"),
 				golars.Col("value").Mean().Alias("value_mean"),
 				golars.Col("value").Count().Alias("value_count"),
-			).
-			Collect(ctx)
+			))
 	case StringFilter:
-		return engine.ScanParquet(path).
+		return collect(ctx, engine.ScanParquet(path).
 			Filter(golars.Col("payload").Str().StartsWith(golars.Lit("payload-00"))).
-			Select(golars.Col("tenant"), golars.Col("payload"), golars.Col("value")).
-			Collect(ctx)
+			Select(golars.Col("tenant"), golars.Col("payload"), golars.Col("value")))
+	case LimitPushdown:
+		return collect(ctx, engine.ScanParquet(path).
+			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
+			Select(golars.Col("group_id"), golars.Col("value")).
+			Limit(1_000))
+	case SortedTopK:
+		return collect(ctx, engine.ScanParquet(path).
+			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
+			Select(golars.Col("id"), golars.Col("tenant"), golars.Col("value")).
+			Sort(golars.Col("value").Desc()).
+			Limit(100))
+	case WindowAggregation:
+		return collect(ctx, engine.ScanParquet(path).
+			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
+			WithColumns(golars.Col("value").Sum().Over(golars.Col("tenant")).Alias("tenant_total")).
+			Select(golars.Col("tenant"), golars.Col("value"), golars.Col("tenant_total")))
+	case SelfJoin:
+		left := engine.ScanParquet(path).
+			Filter(golars.Col("id").Lt(golars.Lit(cutoff))).
+			Select(golars.Col("tenant"), golars.Col("group_id"), golars.Col("value")).
+			Limit(2_000)
+		right := engine.ScanParquet(path).
+			Filter(golars.Col("id").Ge(golars.Lit(cutoff))).
+			Select(golars.Col("tenant"), golars.Col("group_id"), golars.Col("quantity")).
+			Limit(2_000)
+		joined := left.Join(right, []golars.Expr{golars.Col("tenant")}, []golars.Expr{golars.Col("tenant")})
+		defer left.Close()
+		defer right.Close()
+		return collect(ctx, joined)
+	case UniqueTenant:
+		return collect(ctx, engine.ScanParquet(path).
+			Select(golars.Col("tenant"), golars.Col("group_id"), golars.Col("value")).
+			Unique("tenant"))
+	case FullAggregation:
+		return collect(ctx, engine.ScanParquet(path).
+			GroupBy(golars.Col("tenant")).
+			Agg(
+				golars.Col("value").Sum().Alias("value_sum"),
+				golars.Col("value").Mean().Alias("value_mean"),
+				golars.Col("value").Count().Alias("value_count"),
+			))
 	}
 	return nil, fmt.Errorf("benchmarks: unknown query %q", query)
+}
+
+func collect(ctx context.Context, plan *golars.LazyFrame) (*golars.DataFrame, error) {
+	if plan == nil {
+		return nil, fmt.Errorf("benchmarks: nil lazy plan")
+	}
+	defer plan.Close()
+	return plan.Collect(ctx)
 }

@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
@@ -128,16 +127,5 @@ func evalScalarComparison(ctx context.Context, engine *Engine, node *exprNode, b
 }
 
 func comparisonLiteralScalar(value any, dtype arrow.DataType) (scalar.Scalar, error) {
-	if value == nil {
-		return scalar.MakeNullScalar(dtype), nil
-	}
-	if timestamp, ok := value.(time.Time); ok {
-		switch dtype.ID() {
-		case arrow.TIMESTAMP:
-			return scalar.MakeScalarParam(arrow.Timestamp(timestamp.UnixNano()), dtype)
-		case arrow.DATE64:
-			return scalar.MakeScalarParam(arrow.Date64(timestamp.UnixMilli()), dtype)
-		}
-	}
-	return scalar.MakeScalarParam(value, dtype)
+	return scalarForType(value, dtype)
 }

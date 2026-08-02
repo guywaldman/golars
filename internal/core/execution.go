@@ -21,7 +21,7 @@ func (lf *LazyFrame) collectWithScanRequest(ctx context.Context, request *scanRe
 	if err != nil {
 		return nil, err
 	}
-	return &DataFrame{table: table, engine: lf.engine}, nil
+	return newDataFrameWithTable(table, lf.engine), nil
 }
 
 func (lf *LazyFrame) collectTable(ctx context.Context, request *scanRequest) (arrow.Table, error) {
@@ -60,7 +60,8 @@ func (lf *LazyFrame) executeBatches(ctx context.Context, callback func(arrow.Rec
 
 func (lf *LazyFrame) executeBatchesWithScanRequest(ctx context.Context, request *scanRequest, callback func(arrow.RecordBatch) error) error {
 	nodes := make([]*planNode, 0, 8)
-	for node := lf.plan; node != nil; node = node.input {
+	plan := optimizePlan(lf.plan)
+	for node := plan; node != nil; node = node.input {
 		nodes = append(nodes, node)
 	}
 	if len(nodes) == 0 {

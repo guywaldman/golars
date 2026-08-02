@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -10,12 +11,24 @@ import (
 )
 
 // DataFrame is an eager, immutable Arrow-backed table. Operations return new
-// frames and do not mutate their receiver.
+// frames and do not mutate their receiver. Close releases its Arrow reference
+// deterministically; the finalizer is only a safety net.
 type DataFrame struct {
 	table  arrow.Table
 	engine *Engine
 	once   sync.Once
 }
+
+func newDataFrameWithTable(table arrow.Table, engine *Engine) *DataFrame {
+	if engine == nil {
+		engine = getDefaultEngine()
+	}
+	df := &DataFrame{table: table, engine: engine}
+	runtime.SetFinalizer(df, finalizeDataFrame)
+	return df
+}
+
+func finalizeDataFrame(df *DataFrame) { df.Close() }
 
 func NewDataFrame(columns ...*Series) (*DataFrame, error) {
 	return newDataFrame(getDefaultEngine(), columns...)
@@ -56,7 +69,7 @@ func newDataFrame(engine *Engine, columns ...*Series) (*DataFrame, error) {
 	}
 	schema := arrow.NewSchema(fields, nil)
 	table := array.NewTableFromSlice(schema, data)
-	return &DataFrame{table: table, engine: engine}, nil
+	return newDataFrameWithTable(table, engine), nil
 }
 
 func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
@@ -64,10 +77,42 @@ func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 		return nil, fmt.Errorf("golars: nil Arrow table")
 	}
 	table.Retain()
-	return &DataFrame{table: table, engine: getDefaultEngine()}, nil
+	return newDataFrameWithTable(table, getDefaultEngine()), nil
 }
 
 func NewDataFrameFromArrow(table arrow.Table) (*DataFrame, error) { return DataFrameFromArrow(table) }
+
+func DataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
+	if batch == nil {
+		return nil, fmt.Errorf("golars: nil Arrow record batch")
+	}
+	return DataFrameFromRecordBatches([]arrow.RecordBatch{batch})
+}
+
+func NewDataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
+	return DataFrameFromRecordBatch(batch)
+}
+
+func DataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
+	if len(batches) == 0 || batches[0] == nil {
+		return nil, fmt.Errorf("golars: at least one Arrow record batch is required")
+	}
+	schema := batches[0].Schema()
+	for i, batch := range batches {
+		if batch == nil {
+			return nil, fmt.Errorf("golars: Arrow record batch %d is nil", i)
+		}
+		if !schema.Equal(batch.Schema()) {
+			return nil, fmt.Errorf("golars: Arrow record batch %d has a different schema", i)
+		}
+	}
+	table := array.NewTableFromRecords(schema, batches)
+	return newDataFrameWithTable(table, getDefaultEngine()), nil
+}
+
+func NewDataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
+	return DataFrameFromRecordBatches(batches)
+}
 
 func (df *DataFrame) ensureOpen() error {
 	if df == nil || df.table == nil {
@@ -121,24 +166,33 @@ func (df *DataFrame) Lazy() *LazyFrame {
 	if df == nil || df.table == nil {
 		return &LazyFrame{err: ErrClosed}
 	}
-	df.table.Retain()
-	return &LazyFrame{engine: df.engine, plan: &planNode{kind: planTable, table: df.table}}
+	return newLazyFrame(df.engine, &planNode{kind: planTable, table: df.table}, nil)
 }
 
 func (df *DataFrame) Select(exprs ...Expr) (*DataFrame, error) {
-	return df.Lazy().Select(exprs...).Collect(context.Background())
+	plan := df.Lazy().Select(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 func (df *DataFrame) Filter(predicate Expr) (*DataFrame, error) {
-	return df.Lazy().Filter(predicate).Collect(context.Background())
+	plan := df.Lazy().Filter(predicate)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 func (df *DataFrame) WithColumns(exprs ...Expr) (*DataFrame, error) {
-	return df.Lazy().WithColumns(exprs...).Collect(context.Background())
+	plan := df.Lazy().WithColumns(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 func (df *DataFrame) Limit(n int64) (*DataFrame, error) {
-	return df.Lazy().Limit(n).Collect(context.Background())
+	plan := df.Lazy().Limit(n)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 func (df *DataFrame) Sort(exprs ...Expr) (*DataFrame, error) {
-	return df.Lazy().Sort(exprs...).Collect(context.Background())
+	plan := df.Lazy().Sort(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 func (df *DataFrame) Head(n int64) (*DataFrame, error) { return df.Limit(n) }
 func (df *DataFrame) Tail(n int64) (*DataFrame, error) {
@@ -160,7 +214,7 @@ func (df *DataFrame) Tail(n int64) (*DataFrame, error) {
 	result := record.NewSlice(record.NumRows()-n, record.NumRows())
 	defer result.Release()
 	table := array.NewTableFromRecords(result.Schema(), []arrow.RecordBatch{result})
-	return &DataFrame{table: table, engine: df.engine}, nil
+	return newDataFrameWithTable(table, df.engine), nil
 }
 
 func (df *DataFrame) Drop(names ...string) (*DataFrame, error) {
@@ -214,6 +268,22 @@ func (df *DataFrame) DropNulls(names ...string) (*DataFrame, error) {
 	return df.Filter(predicate)
 }
 
+func (df *DataFrame) Unique(columns ...string) (*DataFrame, error) {
+	plan := df.Lazy().Unique(columns...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+func (df *DataFrame) Explode(columns ...string) (*DataFrame, error) {
+	plan := df.Lazy().Explode(columns...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+func (df *DataFrame) Unnest(columns ...string) (*DataFrame, error) {
+	plan := df.Lazy().Unnest(columns...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
 func (df *DataFrame) WriteParquet(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteParquet(ctx, df, destination, options...)
 }
@@ -237,6 +307,7 @@ func (df *DataFrame) Close() {
 	if df == nil {
 		return
 	}
+	runtime.SetFinalizer(df, nil)
 	df.once.Do(func() {
 		if df.table != nil {
 			df.table.Release()
@@ -244,6 +315,10 @@ func (df *DataFrame) Close() {
 		}
 	})
 }
+
+// Release is an alias for Close for consistency with Arrow's reference-counted
+// objects. Close remains the preferred name in ordinary Go code.
+func (df *DataFrame) Release() { df.Close() }
 
 // GroupBy is an eager grouped aggregation builder.
 type GroupBy struct {
