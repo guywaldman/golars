@@ -40,11 +40,14 @@ one branch does not invalidate another.
   IPC file/stream formats.
 - Lazy and eager sinks for the same formats, with non-overwriting local-file
   defaults. `LazyFrame.Sink` selects the writer from the destination extension.
+- Row-oriented helpers: `Rows`/`ToDicts` materialize detached row maps, while
+  `ForEachRow` streams them without retaining the complete result.
 - Local globbing and Hive-style Parquet partition discovery.
 - Hive dataset writes with `Create`/`Append`, partition columns,
   `_SUCCESS`, and `_golars_schema.json`.
-- Pluggable `ObjectStore` implementations. Official S3 and GCS adapters are
-  included; register them once with `RegisterObjectStore` or `WithObjectStore`.
+- Built-in S3 and GCS URI support using standard credential discovery. Custom
+  `ObjectStore` implementations can override them with `RegisterObjectStore`
+  or `WithObjectStore`.
 - Engine-wide memory accounting with a 1 GiB default quota and contextual
   cancellation through `context.Context`.
 
@@ -115,6 +118,8 @@ it does not select or auto-detect a container runtime.
   receive exact evaluation.
 - `LazyFrame.ForEachBatch` executes incrementally, and `LazyFrame.Sink` writes
   Parquet batches without first collecting the complete frame.
+- `LazyFrame.ForEachRow` is the row-oriented streaming counterpart; use
+  `LazyFrame.Height(ctx)` to count rows without retaining them.
 - Regression tests cover row-group selection, range-only reads, batch
   iteration, and streaming sinks.
 

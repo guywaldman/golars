@@ -61,6 +61,7 @@ var (
 
 type (
 	DataType            = core.DataType
+	Row                 = core.Row
 	Field               = core.Field
 	Schema              = core.Schema
 	Series              = core.Series

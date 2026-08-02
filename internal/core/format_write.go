@@ -48,9 +48,9 @@ func writeParquetBatches(ctx context.Context, lf *LazyFrame, destination string,
 	open := func(schema *arrow.Schema) error {
 		var err error
 		if scheme := storageuri.Scheme(destination); scheme != "" {
-			store, ok := lf.engine.ObjectStore(scheme)
-			if !ok {
-				return fmt.Errorf("golars: no object store registered for %q", scheme)
+			store, storeErr := lf.engine.ensureObjectStore(ctx, scheme)
+			if storeErr != nil {
+				return storeErr
 			}
 			file, err = store.Create(ctx, destination)
 		} else {
@@ -144,9 +144,9 @@ func writeWithFile(ctx context.Context, df *DataFrame, destination string, optio
 	var file io.WriteCloser
 	var err error
 	if scheme := storageuri.Scheme(destination); scheme != "" {
-		store, ok := df.engine.ObjectStore(scheme)
-		if !ok {
-			return fmt.Errorf("golars: no object store registered for %q", scheme)
+		store, storeErr := df.engine.ensureObjectStore(ctx, scheme)
+		if storeErr != nil {
+			return storeErr
 		}
 		file, err = store.Create(ctx, destination)
 	} else {

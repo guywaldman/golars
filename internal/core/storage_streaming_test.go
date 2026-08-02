@@ -17,6 +17,46 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
+func TestBuiltInGCSStoreIsCreatedOnFirstUse(t *testing.T) {
+	engine, err := NewEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	store, err := engine.ensureObjectStore(context.Background(), "gs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.(*GCSStore); !ok {
+		t.Fatalf("default gs store type=%T, want *GCSStore", store)
+	}
+	registered, ok := engine.ObjectStore("gs")
+	if !ok || registered != store {
+		t.Fatal("default gs store was not retained by the engine")
+	}
+}
+
+func TestSingleRemotePathDoesNotList(t *testing.T) {
+	store := &recordingRangeStore{uri: "mem://bucket/data.parquet"}
+	engine, err := NewEngine(WithObjectStore("mem", store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	paths, err := expandPathsForEngine(context.Background(), engine, store.uri, formatParquet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(paths, []string{store.uri}) {
+		t.Fatalf("paths=%v, want [%s]", paths, store.uri)
+	}
+	if store.globCalls != 0 {
+		t.Fatalf("single object path called Glob %d times", store.globCalls)
+	}
+}
+
 func TestRowGroupPruningAndRangeReads(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "data.parquet")
@@ -490,6 +530,7 @@ type recordingRangeStore struct {
 	data      []byte
 	fullOpens int
 	ranges    [][2]int64
+	globCalls int
 }
 
 func (s *recordingRangeStore) Open(_ context.Context, uri string) (io.ReadCloser, error) {
@@ -510,6 +551,9 @@ func (s *recordingRangeStore) Create(_ context.Context, uri string) (io.WriteClo
 }
 
 func (s *recordingRangeStore) Glob(_ context.Context, pattern string) ([]string, error) {
+	s.mu.Lock()
+	s.globCalls++
+	s.mu.Unlock()
 	if pattern != s.uri {
 		return nil, os.ErrNotExist
 	}

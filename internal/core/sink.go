@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 
@@ -22,9 +21,9 @@ func openSinkDestination(ctx context.Context, engine *Engine, destination string
 		return nil, err
 	}
 	if scheme := storageuri.Scheme(destination); scheme != "" {
-		store, ok := engine.ObjectStore(scheme)
-		if !ok {
-			return nil, fmt.Errorf("golars: no object store registered for %q", scheme)
+		store, err := engine.ensureObjectStore(ctx, scheme)
+		if err != nil {
+			return nil, err
 		}
 		return store.Create(ctx, destination)
 	}

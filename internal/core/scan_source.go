@@ -125,9 +125,12 @@ func expandPaths(ctx context.Context, path string) ([]string, error) {
 
 func expandPathsForEngine(ctx context.Context, engine *Engine, path string, format formatKind) ([]string, error) {
 	if scheme := storageuri.Scheme(path); scheme != "" {
-		store, ok := engine.ObjectStore(scheme)
-		if !ok {
-			return nil, fmt.Errorf("golars: no object store registered for %q", scheme)
+		if !strings.ContainsAny(path, "*?[") {
+			return []string{path}, nil
+		}
+		store, err := engine.ensureObjectStore(ctx, scheme)
+		if err != nil {
+			return nil, err
 		}
 		return store.Glob(ctx, path)
 	}
@@ -240,9 +243,9 @@ func newMultiSource(ctx context.Context, engine *Engine, paths []string, format 
 func openSource(ctx context.Context, engine *Engine, path string, format formatKind, config scanConfig) (recordSource, error) {
 	request := scanRequestFromContext(ctx)
 	if scheme := storageuri.Scheme(path); scheme != "" {
-		store, ok := engine.ObjectStore(scheme)
-		if !ok {
-			return nil, fmt.Errorf("golars: no object store registered for %q", scheme)
+		store, err := engine.ensureObjectStore(ctx, scheme)
+		if err != nil {
+			return nil, err
 		}
 		if format == formatParquet {
 			if ranged, rangedOK := store.(RangeObjectStore); rangedOK {

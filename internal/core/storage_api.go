@@ -9,8 +9,9 @@ import (
 	"google.golang.org/api/option"
 )
 
-// ObjectStore is the minimal storage contract used by scans and sinks. Stores
-// are registered by URI scheme; no session object is required for ordinary use.
+// ObjectStore is the minimal storage contract used by scans and sinks. The
+// built-in s3:// and gs:// adapters are created lazily; custom stores can be
+// registered by URI scheme without introducing a session lifecycle.
 type ObjectStore = internalstorage.ObjectStore
 
 // ObjectInfo contains the metadata needed for random-access scans.

@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	internalstorage "github.com/guywaldman/golars/internal/storage"
+	"google.golang.org/api/option"
 )
 
 const DefaultMemoryLimit int64 = 1 << 30
@@ -127,6 +130,7 @@ type Engine struct {
 	batchSize   int64
 	native      bool
 	stores      map[string]internalstorage.ObjectStore
+	managed     []io.Closer
 	storeMu     sync.RWMutex
 	closed      atomic.Bool
 }
@@ -154,7 +158,18 @@ func (e *Engine) BatchSize() int64   { return e.batchSize }
 func (e *Engine) NativeBackendEnabled() bool {
 	return e != nil && e.native
 }
-func (e *Engine) Close() { e.closed.Store(true) }
+func (e *Engine) Close() {
+	if e == nil || e.closed.Swap(true) {
+		return
+	}
+	e.storeMu.Lock()
+	managed := e.managed
+	e.managed = nil
+	e.storeMu.Unlock()
+	for _, store := range managed {
+		_ = store.Close()
+	}
+}
 
 func (e *Engine) ObjectStore(scheme string) (ObjectStore, bool) {
 	if e == nil {
@@ -181,6 +196,55 @@ func (e *Engine) RegisterObjectStore(scheme string, store ObjectStore) error {
 	e.stores[scheme] = store
 	e.storeMu.Unlock()
 	return nil
+}
+
+// ensureObjectStore returns a registered store, creating the standard cloud
+// adapter on first use when no custom store was supplied. Custom stores remain
+// authoritative, which keeps emulators and S3-compatible endpoints working.
+func (e *Engine) ensureObjectStore(ctx context.Context, scheme string) (ObjectStore, error) {
+	if e == nil {
+		return nil, ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	scheme = strings.ToLower(strings.TrimSuffix(scheme, "://"))
+
+	e.storeMu.Lock()
+	defer e.storeMu.Unlock()
+	if store, ok := e.stores[scheme]; ok {
+		return store, nil
+	}
+
+	var (
+		store   ObjectStore
+		managed io.Closer
+		err     error
+	)
+	switch scheme {
+	case "gs":
+		var gcs *GCSStore
+		gcs, err = NewGCSStore(ctx)
+		if err != nil {
+			// Public buckets do not need ADC. Retry anonymously when the
+			// standard credential chain is unavailable.
+			gcs, err = NewGCSStore(ctx, option.WithoutAuthentication())
+		}
+		store = gcs
+		managed = gcs
+	case "s3":
+		store, err = NewS3Store(ctx)
+	default:
+		return nil, fmt.Errorf("golars: no object store registered for %q", scheme)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("golars: initialize %s object store: %w", scheme, err)
+	}
+	e.stores[scheme] = store
+	if managed != nil {
+		e.managed = append(e.managed, managed)
+	}
+	return store, nil
 }
 
 // RegisterObjectStore adds a store to the package default engine. This is an
