@@ -2,33 +2,90 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/guywaldman/golars/internal/storageuri"
 )
 
 // S3Store adapts an AWS S3-compatible object store to the scan/sink API.
-type S3Store struct{ client *s3.Client }
+type S3Store struct {
+	client  *s3.Client
+	mu      sync.RWMutex
+	clients map[string]*s3.Client
+}
 
 func NewS3Store(ctx context.Context, options ...func(*s3.Options)) (*S3Store, error) {
 	config, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &S3Store{client: s3.NewFromConfig(config, options...)}, nil
+	return newS3Store(s3.NewFromConfig(config, options...)), nil
 }
 
 func NewS3StoreWithClient(client *s3.Client) (*S3Store, error) {
 	if client == nil {
 		return nil, fmt.Errorf("golars: nil S3 client")
 	}
-	return &S3Store{client: client}, nil
+	return newS3Store(client), nil
+}
+
+func newS3Store(client *s3.Client) *S3Store {
+	return &S3Store{client: client, clients: make(map[string]*s3.Client)}
+}
+
+func (s *S3Store) clientFor(bucket string) *s3.Client {
+	s.mu.RLock()
+	client := s.clients[bucket]
+	s.mu.RUnlock()
+	if client != nil {
+		return client
+	}
+	return s.client
+}
+
+func (s *S3Store) clientForRegion(bucket, region string) *s3.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if client := s.clients[bucket]; client != nil {
+		return client
+	}
+	options := s.client.Options()
+	options.Region = region
+	client := s3.New(options)
+	s.clients[bucket] = client
+	return client
+}
+
+func withS3Client[T any](s *S3Store, bucket string, operation func(*s3.Client) (T, error)) (T, error) {
+	result, err := operation(s.clientFor(bucket))
+	if region := redirectRegion(err); region != "" {
+		result, err = operation(s.clientForRegion(bucket, region))
+	}
+	return result, err
+}
+
+func redirectRegion(err error) string {
+	if err == nil {
+		return ""
+	}
+	var responseErr interface {
+		HTTPStatusCode() int
+		HTTPResponse() *smithyhttp.Response
+	}
+	if !errors.As(err, &responseErr) || responseErr.HTTPStatusCode() != http.StatusMovedPermanently {
+		return ""
+	}
+	return strings.TrimSpace(responseErr.HTTPResponse().Header.Get("x-amz-bucket-region"))
 }
 
 func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
@@ -36,7 +93,9 @@ func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	object, err := withS3Client(s, bucket, func(client *s3.Client) (*s3.GetObjectOutput, error) {
+		return client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +107,9 @@ func (s *S3Store) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	object, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	object, err := withS3Client(s, bucket, func(client *s3.Client) (*s3.HeadObjectOutput, error) {
+		return client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	})
 	if err != nil {
 		return ObjectInfo{}, err
 	}
@@ -68,10 +129,12 @@ func (s *S3Store) OpenRange(ctx context.Context, uri string, offset, length int6
 	}
 	end := offset + length - 1
 	rangeValue := fmt.Sprintf("bytes=%d-%d", offset, end)
-	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Range:  aws.String(rangeValue),
+	object, err := withS3Client(s, bucket, func(client *s3.Client) (*s3.GetObjectOutput, error) {
+		return client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Range:  aws.String(rangeValue),
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -106,7 +169,9 @@ func (s *S3Store) Glob(ctx context.Context, pattern string) ([]string, error) {
 	result := make([]string, 0)
 	var token *string
 	for {
-		page, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix), ContinuationToken: token})
+		page, err := withS3Client(s, bucket, func(client *s3.Client) (*s3.ListObjectsV2Output, error) {
+			return client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix), ContinuationToken: token})
+		})
 		if err != nil {
 			return nil, err
 		}
