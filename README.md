@@ -114,8 +114,12 @@ public type names and richer Polars parity surface will continue to grow.
 
 ## Repository layout
 
-- The module root contains the public `golars` API plus the tightly coupled
-  logical-plan and execution kernels.
+- `golars.go` is the small public compatibility facade. It aliases the public
+  types and forwards constructors/functions to the implementation package.
+- `internal/core` owns the tightly coupled public API implementation,
+  logical-plan/execution kernels, and white-box tests. Keeping that package
+  together avoids artificial import cycles while keeping the module root free
+  of implementation files.
 - `internal/arrowutil` contains shared Arrow ownership and scalar helpers;
   `internal/jsonio` handles JSON inference and encoding; `internal/ipcio`
   handles Arrow IPC file readers.
