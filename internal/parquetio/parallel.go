@@ -21,15 +21,16 @@ type parallelBatch struct {
 }
 
 type parallelSource struct {
-	schema     *arrow.Schema
-	reader     *pqarrow.FileReader
-	groups     []parallelGroup
-	groupIndex int
-	current    arrow.RecordBatch
-	err        error
-	cancel     context.CancelFunc
-	done       chan struct{}
-	once       sync.Once
+	schema          *arrow.Schema
+	reader          *pqarrow.FileReader
+	restoreParallel bool
+	groups          []parallelGroup
+	groupIndex      int
+	current         arrow.RecordBatch
+	err             error
+	cancel          context.CancelFunc
+	done            chan struct{}
+	once            sync.Once
 }
 
 func newParallelSource(
@@ -49,17 +50,20 @@ func newParallelSource(
 		workers = len(rowGroups)
 	}
 	readCtx, cancel := context.WithCancel(ctx)
+	restoreParallel := reader.Props.Parallel
+	reader.Props.Parallel = false
 	groupRows := make([][]int, workers)
 	for i, rowGroup := range rowGroups {
 		groupIndex := i * workers / len(rowGroups)
 		groupRows[groupIndex] = append(groupRows[groupIndex], rowGroup)
 	}
 	source := &parallelSource{
-		schema: schema,
-		reader: reader,
-		groups: make([]parallelGroup, workers),
-		cancel: cancel,
-		done:   make(chan struct{}),
+		schema:          schema,
+		reader:          reader,
+		restoreParallel: restoreParallel,
+		groups:          make([]parallelGroup, workers),
+		cancel:          cancel,
+		done:            make(chan struct{}),
 	}
 	for i := range source.groups {
 		source.groups[i].rowGroups = groupRows[i]
@@ -177,6 +181,7 @@ func (s *parallelSource) Release() {
 	s.once.Do(func() {
 		s.cancel()
 		<-s.done
+		s.reader.Props.Parallel = s.restoreParallel
 		if s.current != nil {
 			s.current.Release()
 			s.current = nil
