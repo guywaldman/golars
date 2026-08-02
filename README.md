@@ -60,6 +60,17 @@ executor with `WithNativeBackend(false)`. Embedded native assets currently cover
 macOS arm64 and Linux amd64/arm64; all other targets remain fully functional
 through the portable executor and are cross-compiled in CI.
 
+To consume an unpublished local checkout from another module, use a local
+replacement together with an explicit synthetic version:
+
+```sh
+go mod edit -replace=github.com/guywaldman/golars=/absolute/path/to/golars
+go get github.com/guywaldman/golars@v0.0.0
+```
+
+The explicit version prevents `go get` from querying the module proxy for a
+remote version before applying the replacement.
+
 ## Query planning and storage
 
 - Lazy scans derive the columns required by a terminal projection and its
