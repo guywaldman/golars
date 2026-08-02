@@ -149,6 +149,7 @@ jobs:
           name: native-assets-source
           path: native-assets-artifact
       - uses: peter-evans/create-pull-request@v7
+        continue-on-error: true
         with:
           base: ${{ inputs.base_branch || github.ref_name }}
           branch: automation/native-assets-${{ github.run_id }}
