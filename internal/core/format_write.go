@@ -16,6 +16,7 @@ import (
 	"github.com/guywaldman/golars/internal/storageuri"
 )
 
+// WriteParquet writes a DataFrame as Parquet.
 func WriteParquet(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {
 		props := parquet.NewWriterProperties()
@@ -91,18 +92,25 @@ func writeParquetBatches(ctx context.Context, lf *LazyFrame, destination string,
 	return closeErr
 }
 
+// WriteCSV writes a DataFrame as CSV.
 func WriteCSV(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {
 		writer := csv.NewWriter(file, table.Schema(), csv.WithHeader(config.hasHeader), csv.WithComma(config.delimiter))
 		return writeBatches(ctx, table, config.batchSize, func(batch arrow.RecordBatch) error { return writer.Write(batch) }, writer.Flush)
 	})
 }
+
+// WriteNDJSON writes a DataFrame as newline-delimited JSON.
 func WriteNDJSON(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeJSON(ctx, df, destination, false, options...)
 }
+
+// WriteJSON writes a DataFrame as a JSON array.
 func WriteJSON(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeJSON(ctx, df, destination, true, options...)
 }
+
+// WriteIPCFile writes a DataFrame as an Arrow IPC file.
 func WriteIPCFile(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {
 		writer, err := ipc.NewFileWriter(file, ipc.WithSchema(table.Schema()), ipc.WithAllocator(df.engine.allocator))
@@ -116,6 +124,8 @@ func WriteIPCFile(ctx context.Context, df *DataFrame, destination string, option
 		return writer.Close()
 	})
 }
+
+// WriteIPCStream writes a DataFrame as an Arrow IPC stream.
 func WriteIPCStream(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {
 		writer := ipc.NewWriter(file, ipc.WithSchema(table.Schema()), ipc.WithAllocator(df.engine.allocator))

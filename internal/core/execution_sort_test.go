@@ -67,6 +67,28 @@ func TestSortLimitKeepsStableTopKRows(t *testing.T) {
 	}
 }
 
+func TestTailRunsThroughNativePlan(t *testing.T) {
+	values, err := NewSeries("value", []int64{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer values.Close()
+	df, err := NewDataFrame(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Close()
+
+	tail, err := df.Tail(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tail.Close()
+	if got := int64ColumnValues(t, tail, "value"); !reflect.DeepEqual(got, []int64{3, 4}) {
+		t.Fatalf("tail values=%v", got)
+	}
+}
+
 func sortedInt64Values(t *testing.T, df *DataFrame) []int64 {
 	return int64ColumnValues(t, df, "value")
 }

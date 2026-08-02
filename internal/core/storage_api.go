@@ -24,10 +24,12 @@ type RangeObjectStore = internalstorage.RangeObjectStore
 // S3Store adapts an AWS S3-compatible object store to the scan/sink API.
 type S3Store = internalstorage.S3Store
 
+// NewS3Store creates an S3-backed ObjectStore.
 func NewS3Store(ctx context.Context, options ...func(*s3.Options)) (*S3Store, error) {
 	return internalstorage.NewS3Store(ctx, options...)
 }
 
+// NewS3StoreWithClient wraps an existing S3 client as an ObjectStore.
 func NewS3StoreWithClient(client *s3.Client) (*S3Store, error) {
 	return internalstorage.NewS3StoreWithClient(client)
 }
@@ -35,10 +37,12 @@ func NewS3StoreWithClient(client *s3.Client) (*S3Store, error) {
 // GCSStore adapts Google Cloud Storage to the scan/sink API.
 type GCSStore = internalstorage.GCSStore
 
+// NewGCSStore creates a Google Cloud Storage-backed ObjectStore.
 func NewGCSStore(ctx context.Context, options ...option.ClientOption) (*GCSStore, error) {
 	return internalstorage.NewGCSStore(ctx, options...)
 }
 
+// NewGCSStoreWithClient wraps an existing Cloud Storage client as an ObjectStore.
 func NewGCSStoreWithClient(client *storage.Client) (*GCSStore, error) {
 	return internalstorage.NewGCSStoreWithClient(client)
 }

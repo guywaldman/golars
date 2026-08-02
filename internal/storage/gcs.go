@@ -17,6 +17,7 @@ import (
 // Google client-library environment and workload-identity configuration.
 type GCSStore struct{ client *storage.Client }
 
+// NewGCSStore creates a Google Cloud Storage-backed ObjectStore.
 func NewGCSStore(ctx context.Context, options ...option.ClientOption) (*GCSStore, error) {
 	client, err := storage.NewClient(ctx, options...)
 	if err != nil {
@@ -25,6 +26,7 @@ func NewGCSStore(ctx context.Context, options ...option.ClientOption) (*GCSStore
 	return &GCSStore{client: client}, nil
 }
 
+// NewGCSStoreWithClient wraps an existing Cloud Storage client.
 func NewGCSStoreWithClient(client *storage.Client) (*GCSStore, error) {
 	if client == nil {
 		return nil, fmt.Errorf("golars: nil GCS client")
@@ -32,6 +34,7 @@ func NewGCSStoreWithClient(client *storage.Client) (*GCSStore, error) {
 	return &GCSStore{client: client}, nil
 }
 
+// Open opens a Cloud Storage object for reading.
 func (s *GCSStore) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	bucket, key, err := storageuri.Parse(uri, "gs")
 	if err != nil {
@@ -40,6 +43,7 @@ func (s *GCSStore) Open(ctx context.Context, uri string) (io.ReadCloser, error) 
 	return s.client.Bucket(bucket).Object(key).NewReader(ctx)
 }
 
+// Stat returns Cloud Storage object metadata.
 func (s *GCSStore) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
 	bucket, key, err := storageuri.Parse(uri, "gs")
 	if err != nil {
@@ -52,6 +56,7 @@ func (s *GCSStore) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
 	return ObjectInfo{Size: attrs.Size}, nil
 }
 
+// OpenRange opens a byte range of a Cloud Storage object.
 func (s *GCSStore) OpenRange(ctx context.Context, uri string, offset, length int64) (io.ReadCloser, error) {
 	if err := storageuri.ValidateRange(offset, length); err != nil {
 		return nil, err
@@ -63,6 +68,7 @@ func (s *GCSStore) OpenRange(ctx context.Context, uri string, offset, length int
 	return s.client.Bucket(bucket).Object(key).NewRangeReader(ctx, offset, length)
 }
 
+// Create opens a Cloud Storage object for writing.
 func (s *GCSStore) Create(ctx context.Context, uri string) (io.WriteCloser, error) {
 	bucket, key, err := storageuri.Parse(uri, "gs")
 	if err != nil {
@@ -71,6 +77,7 @@ func (s *GCSStore) Create(ctx context.Context, uri string) (io.WriteCloser, erro
 	return s.client.Bucket(bucket).Object(key).NewWriter(ctx), nil
 }
 
+// Glob lists Cloud Storage objects matching a URI pattern.
 func (s *GCSStore) Glob(ctx context.Context, pattern string) ([]string, error) {
 	bucket, keyPattern, err := storageuri.Parse(pattern, "gs")
 	if err != nil {
@@ -102,6 +109,7 @@ func (s *GCSStore) Glob(ctx context.Context, pattern string) ([]string, error) {
 	return result, nil
 }
 
+// Close closes the underlying Cloud Storage client.
 func (s *GCSStore) Close() error {
 	if s == nil || s.client == nil {
 		return nil

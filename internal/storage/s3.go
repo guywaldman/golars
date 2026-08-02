@@ -24,6 +24,7 @@ type S3Store struct {
 	clients map[string]*s3.Client
 }
 
+// NewS3Store creates an S3-backed ObjectStore using default credentials.
 func NewS3Store(ctx context.Context, options ...func(*s3.Options)) (*S3Store, error) {
 	config, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -32,6 +33,7 @@ func NewS3Store(ctx context.Context, options ...func(*s3.Options)) (*S3Store, er
 	return newS3Store(s3.NewFromConfig(config, options...)), nil
 }
 
+// NewS3StoreWithClient wraps an existing S3 client.
 func NewS3StoreWithClient(client *s3.Client) (*S3Store, error) {
 	if client == nil {
 		return nil, fmt.Errorf("golars: nil S3 client")
@@ -88,6 +90,7 @@ func redirectRegion(err error) string {
 	return strings.TrimSpace(responseErr.HTTPResponse().Header.Get("x-amz-bucket-region"))
 }
 
+// Open opens an S3 object for reading.
 func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	bucket, key, err := storageuri.Parse(uri, "s3")
 	if err != nil {
@@ -102,6 +105,7 @@ func (s *S3Store) Open(ctx context.Context, uri string) (io.ReadCloser, error) {
 	return object.Body, nil
 }
 
+// Stat returns S3 object metadata.
 func (s *S3Store) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
 	bucket, key, err := storageuri.Parse(uri, "s3")
 	if err != nil {
@@ -119,6 +123,7 @@ func (s *S3Store) Stat(ctx context.Context, uri string) (ObjectInfo, error) {
 	return ObjectInfo{Size: *object.ContentLength}, nil
 }
 
+// OpenRange opens a byte range of an S3 object.
 func (s *S3Store) OpenRange(ctx context.Context, uri string, offset, length int64) (io.ReadCloser, error) {
 	if err := storageuri.ValidateRange(offset, length); err != nil {
 		return nil, err
@@ -142,6 +147,7 @@ func (s *S3Store) OpenRange(ctx context.Context, uri string, offset, length int6
 	return object.Body, nil
 }
 
+// Create opens an S3 object for writing.
 func (s *S3Store) Create(ctx context.Context, uri string) (io.WriteCloser, error) {
 	bucket, key, err := storageuri.Parse(uri, "s3")
 	if err != nil {
@@ -157,6 +163,7 @@ func (s *S3Store) Create(ctx context.Context, uri string) (io.WriteCloser, error
 	return &s3WriteCloser{writer: writer, done: done}, nil
 }
 
+// Glob lists S3 objects matching a URI pattern.
 func (s *S3Store) Glob(ctx context.Context, pattern string) ([]string, error) {
 	bucket, keyPattern, err := storageuri.Parse(pattern, "s3")
 	if err != nil {

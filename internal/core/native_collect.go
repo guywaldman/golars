@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -10,38 +11,30 @@ import (
 	nativebackend "github.com/guywaldman/golars/internal/native"
 )
 
-func tryNativeCollect(ctx context.Context, engine *Engine, plan *planNode) (*DataFrame, bool, error) {
-	if engine == nil || !engine.native {
-		return nil, false, nil
+func collectNative(ctx context.Context, engine *Engine, plan *planNode) (*DataFrame, error) {
+	if engine == nil {
+		return nil, fmt.Errorf("golars: native execution requires an engine")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, true, err
+		return nil, err
 	}
-	request, eligible, err := marshalNativePlan(plan)
+	request, err := marshalNativePlan(ctx, engine, plan)
 	if err != nil {
-		return nil, true, err
-	}
-	if !eligible {
-		return nil, false, nil
+		return nil, err
 	}
 	runtime, err := nativebackend.Open()
 	if err != nil {
-		if errors.Is(err, nativebackend.ErrUnavailable) {
-			return nil, false, nil
-		}
-		return nil, false, nil
+		return nil, fmt.Errorf("golars: open native Polars backend: %w", err)
 	}
 	frame, err := runtime.ExecuteFrame(request)
 	if err != nil {
-		// Native execution is an optimization. Keep the portable path as the
-		// correctness fallback while the backend grows feature coverage.
-		return nil, false, nil
+		return nil, fmt.Errorf("golars: native Polars execution: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		frame.Close()
-		return nil, true, err
+		return nil, err
 	}
-	return newDataFrameWithNative(frame, engine), true, nil
+	return newDataFrameWithNative(frame, engine), nil
 }
 
 func schemaFromNativeIPC(data []byte) (*arrow.Schema, error) {

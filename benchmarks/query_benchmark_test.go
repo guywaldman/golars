@@ -15,8 +15,6 @@ var benchmarkDataset = flag.String("bench-dataset", "", "Parquet input for the c
 var benchmarkRows = flag.Int64("bench-rows", 0, "generate a deterministic Parquet input with this many rows")
 var benchmarkRowGroupSize = flag.Int64("bench-row-group-size", DefaultRowGroupSize, "row-group size for a generated benchmark input")
 var benchmarkCutoff = flag.Int64("bench-cutoff", -1, "inclusive id filter cutoff; defaults to half the generated input")
-var benchmarkNative = flag.Bool("bench-native", true, "use the bundled native backend when available")
-
 var generatedBenchmarkDataset string
 var generatedBenchmarkDirectory string
 
@@ -116,7 +114,6 @@ func benchmarkQuery(b *testing.B, query Query) {
 	engine, err := golars.NewEngine(
 		golars.WithBatchSize(*benchmarkRowGroupSize),
 		golars.WithParallelism(runtime.GOMAXPROCS(0)),
-		golars.WithNativeBackend(*benchmarkNative),
 	)
 	if err != nil {
 		b.Fatal(err)

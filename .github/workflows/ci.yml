@@ -109,7 +109,6 @@ jobs:
               -query "$query" \
               -iterations 3 \
               -warmup 1 \
-              -native-backend=true \
               > "benchmark-results/${query}-go.json"
             benchmarks/polars/target/release/golars-polars-benchmark \
               --dataset /tmp/golars-benchmark.parquet \
@@ -118,9 +117,6 @@ jobs:
               --warmup 1 \
               > "benchmark-results/${query}-rust.json"
             case "$query" in
-              # These plans intentionally use the portable Go executor today;
-              # keep their known parity gaps visible without treating them as
-              # regressions in the native backend.
               window_aggregation) max_ratio=16.0 ;;
               unique_tenant) max_ratio=8.0 ;;
               *) max_ratio=4.0 ;;

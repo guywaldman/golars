@@ -33,9 +33,6 @@ go test ./benchmarks \
   -bench-cutoff=500000
 ```
 
-The bundled native backend is enabled by default. Use
-`-args -bench-native=false` to measure the portable Go executor.
-
 ## Go vs native Polars across scales
 
 Run the complete workload set at the default scales (5K, 10K, 200K, 500K,
@@ -57,6 +54,11 @@ deterministic Parquet file per scale, runs Go's `-benchmem` benchmarks, and
 runs each equivalent Polars query with matching warmups and iterations. It
 prints the result directory; Go output is stored as `${rows}-go.txt` and the
 Polars measurements as `${rows}-polars-${query}.json`.
+
+The default comparison uses one unmeasured warmup and three measured
+executions per workload (`-benchtime=3x` for Go and `--warmup 1
+--iterations 3` for Polars). `GOLARS_BENCH_TIME`, `GOLARS_BENCH_WARMUP`, and
+`GOLARS_BENCH_POLARS_ITERATIONS` override those values.
 
 Use fewer scales while iterating:
 

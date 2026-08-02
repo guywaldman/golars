@@ -1,5 +1,6 @@
-use std::{panic, slice};
+use std::{fs::File, io::Cursor, panic, slice};
 
+use base64::Engine as _;
 use polars::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -126,8 +127,15 @@ pub extern "C" fn golars_native_free(buffer: *mut u8, length: usize) {
 
 #[derive(Deserialize)]
 struct QueryRequest {
+    #[serde(default)]
     path: String,
     format: String,
+    #[serde(default)]
+    input: String,
+    #[serde(default)]
+    has_header: bool,
+    #[serde(default)]
+    delimiter: String,
     #[serde(default)]
     operations: Vec<QueryOperation>,
 }
@@ -139,6 +147,16 @@ struct QueryOperation {
     exprs: Vec<QueryExpr>,
     #[serde(default)]
     keys: Vec<QueryExpr>,
+    #[serde(default)]
+    right_keys: Vec<QueryExpr>,
+    #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    join_type: String,
+    #[serde(default)]
+    suffix: String,
+    #[serde(default)]
+    right: Option<Box<QueryRequest>>,
     #[serde(default)]
     limit: u64,
 }
@@ -152,6 +170,8 @@ struct QueryExpr {
     literal: Option<QueryLiteral>,
     #[serde(default)]
     args: Vec<QueryExpr>,
+    #[serde(default)]
+    window_keys: Vec<QueryExpr>,
     #[serde(default)]
     dtype: String,
     #[serde(default)]
@@ -168,20 +188,20 @@ struct QueryLiteral {
 fn collect_query(request: &[u8]) -> Result<DataFrame, String> {
     let request: QueryRequest = serde_json::from_slice(request)
         .map_err(|error| format!("invalid native backend request: {error}"))?;
-    if request.format != "parquet" {
-        return Err(format!("unsupported native format {:?}", request.format));
-    }
-    let mut frame = LazyFrame::scan_parquet(
-        PlPath::new(request.path.as_str()),
-        ScanArgsParquet::default(),
-    )
-    .map_err(|error| error.to_string())?;
-    for operation in request.operations {
+    build_query(&request)?
+        .collect()
+        .map_err(|error| error.to_string())
+}
+
+fn build_query(request: &QueryRequest) -> Result<LazyFrame, String> {
+    let mut frame = source_frame(request)?;
+    for operation in &request.operations {
         frame = match operation.kind.as_str() {
             "filter" if operation.exprs.len() == 1 => frame.filter(to_expr(&operation.exprs[0])?),
             "select" => frame.select(to_exprs(&operation.exprs)?),
             "with_columns" => frame.with_columns(to_exprs(&operation.exprs)?),
             "limit" => frame.limit(operation.limit as IdxSize),
+            "tail" => frame.tail(operation.limit as IdxSize),
             "sort" => {
                 let expressions = to_exprs(&operation.exprs)?;
                 let descending = operation.exprs.iter().map(|expr| expr.descending);
@@ -193,12 +213,86 @@ fn collect_query(request: &[u8]) -> Result<DataFrame, String> {
             "group_by" => {
                 let keys = to_exprs(&operation.keys)?;
                 let expressions = to_exprs(&operation.exprs)?;
-                frame.group_by(keys).agg(expressions)
+                frame.group_by_stable(keys).agg(expressions)
             }
+            "join" => {
+                let right = operation
+                    .right
+                    .as_deref()
+                    .ok_or_else(|| "native join is missing its right query".to_owned())?;
+                let right = build_query(right)?;
+                let join_type = to_join_type(&operation.join_type)?;
+                frame
+                    .join_builder()
+                    .with(right)
+                    .left_on(to_exprs(&operation.exprs)?)
+                    .right_on(to_exprs(&operation.right_keys)?)
+                    .how(join_type)
+                    .coalesce(JoinCoalesce::KeepColumns)
+                    .maintain_order(MaintainOrderJoin::Left)
+                    .suffix(if operation.suffix.is_empty() {
+                        "_right"
+                    } else {
+                        operation.suffix.as_str()
+                    })
+                    .finish()
+            }
+            "unique" => {
+                let subset =
+                    (!operation.columns.is_empty()).then(|| cols(operation.columns.clone()));
+                frame.unique_stable(subset, UniqueKeepStrategy::First)
+            }
+            "explode" => frame.explode(cols(operation.columns.clone())),
+            "unnest" => frame.unnest(cols(operation.columns.clone()), None),
             kind => return Err(format!("unsupported native operation {kind:?}")),
         };
     }
-    frame.collect().map_err(|error| error.to_string())
+    Ok(frame)
+}
+
+fn source_frame(request: &QueryRequest) -> Result<LazyFrame, String> {
+    if !request.input.is_empty() {
+        let input = base64::engine::general_purpose::STANDARD
+            .decode(&request.input)
+            .map_err(|error| format!("decode native IPC input: {error}"))?;
+        let dataframe = IpcReader::new(Cursor::new(input))
+            .finish()
+            .map_err(|error| format!("read native IPC input: {error}"))?;
+        return Ok(dataframe.lazy());
+    }
+    if request.path.is_empty() {
+        return Err("native query has neither a path nor IPC input".to_owned());
+    }
+    match request.format.as_str() {
+        "parquet" => LazyFrame::scan_parquet(
+            PlPath::new(request.path.as_str()),
+            ScanArgsParquet::default(),
+        )
+        .map_err(|error| error.to_string()),
+        "csv" => {
+            let mut reader = LazyCsvReader::new(PlPath::new(request.path.as_str()))
+                .with_has_header(request.has_header);
+            if let Some(delimiter) = request.delimiter.as_bytes().first().copied() {
+                reader = reader.with_separator(delimiter);
+            }
+            reader.finish().map_err(|error| error.to_string())
+        }
+        "ipc_file" => LazyFrame::scan_ipc(
+            PlPath::new(request.path.as_str()),
+            IpcScanOptions::default(),
+            UnifiedScanArgs::default(),
+        )
+        .map_err(|error| error.to_string()),
+        "ipc_stream" => {
+            let dataframe = IpcStreamReader::new(
+                File::open(request.path.as_str()).map_err(|error| error.to_string())?,
+            )
+            .finish()
+            .map_err(|error| error.to_string())?;
+            Ok(dataframe.lazy())
+        }
+        format => Err(format!("unsupported native format {format:?}")),
+    }
 }
 
 fn dataframe_ipc(
@@ -252,7 +346,7 @@ fn to_exprs(expressions: &[QueryExpr]) -> Result<Vec<Expr>, String> {
 }
 
 fn to_expr(expression: &QueryExpr) -> Result<Expr, String> {
-    match expression.kind.as_str() {
+    let mut result = match expression.kind.as_str() {
         "column" => Ok(col(expression.name.as_str())),
         "literal" => to_literal(expression.literal.as_ref()),
         "alias" => {
@@ -263,6 +357,47 @@ fn to_expr(expression: &QueryExpr) -> Result<Expr, String> {
         "aggregate" => to_aggregate(expression),
         "call" => to_call(expression),
         kind => Err(format!("unsupported native expression kind {kind:?}")),
+    }?;
+    if expression.kind == "aggregate" {
+        let name = if expression.name == "count_rows" {
+            "count".to_owned()
+        } else if let Some(argument) = expression.args.first() {
+            format!("{}_{}", query_expr_output_name(argument), expression.name)
+        } else {
+            expression.name.clone()
+        };
+        result = result.alias(name);
+    }
+    if !expression.window_keys.is_empty() {
+        result = result.over(to_exprs(&expression.window_keys)?);
+    }
+    Ok(result)
+}
+
+fn query_expr_output_name(expression: &QueryExpr) -> String {
+    match expression.kind.as_str() {
+        "column" | "alias" => expression.name.clone(),
+        "cast" | "call" => expression
+            .args
+            .first()
+            .map(query_expr_output_name)
+            .unwrap_or_else(|| "literal".to_owned()),
+        "aggregate" => {
+            if expression.name == "count_rows" {
+                "count".to_owned()
+            } else {
+                format!(
+                    "{}_{}",
+                    expression
+                        .args
+                        .first()
+                        .map(query_expr_output_name)
+                        .unwrap_or_else(|| "literal".to_owned()),
+                    expression.name
+                )
+            }
+        }
+        _ => "literal".to_owned(),
     }
 }
 
@@ -295,8 +430,49 @@ fn to_literal(literal: Option<&QueryLiteral>) -> Result<Expr, String> {
             .as_f64()
             .map(lit)
             .ok_or_else(|| "native float literal is invalid".to_owned()),
+        "timestamp" => literal
+            .value
+            .as_i64()
+            .map(|value| lit(value).cast(DataType::Datetime(TimeUnit::Nanoseconds, None)))
+            .ok_or_else(|| "native timestamp literal is invalid".to_owned()),
+        "list" => to_list_literal(&literal.value),
         kind => Err(format!("unsupported native literal kind {kind:?}")),
     }
+}
+
+fn to_list_literal(value: &Value) -> Result<Expr, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| "native list literal is invalid".to_owned())?;
+    if values.iter().all(Value::is_i64) {
+        let values = values
+            .iter()
+            .map(|value| value.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        return Ok(lit(Series::new("literal".into(), values)));
+    }
+    if values.iter().all(Value::is_u64) {
+        let values = values
+            .iter()
+            .map(|value| value.as_u64().unwrap())
+            .collect::<Vec<_>>();
+        return Ok(lit(Series::new("literal".into(), values)));
+    }
+    if values.iter().all(Value::is_f64) {
+        let values = values
+            .iter()
+            .map(|value| value.as_f64().unwrap())
+            .collect::<Vec<_>>();
+        return Ok(lit(Series::new("literal".into(), values)));
+    }
+    if values.iter().all(Value::is_string) {
+        let values = values
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        return Ok(lit(Series::new("literal".into(), values)));
+    }
+    Err("native list literal has mixed or unsupported values".to_owned())
 }
 
 fn one_arg(expression: &QueryExpr) -> Result<Expr, String> {
@@ -378,6 +554,10 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
             let (left, right) = two_args(expression)?;
             Ok(left / right)
         }
+        "modulo" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left % right)
+        }
         "and_kleene" => {
             let (left, right) = two_args(expression)?;
             Ok(left.and(right))
@@ -408,11 +588,69 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
             let (left, right) = two_args(expression)?;
             Ok(left.fill_null(right))
         }
+        "when_then" => {
+            if expression.args.len() != 3 {
+                return Err("native when_then requires three arguments".to_owned());
+            }
+            Ok(when(to_expr(&expression.args[0])?)
+                .then(to_expr(&expression.args[1])?)
+                .otherwise(to_expr(&expression.args[2])?))
+        }
+        "is_in" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left.is_in(right, false))
+        }
+        "is_between" => {
+            if expression.args.len() != 3 {
+                return Err("native is_between requires three arguments".to_owned());
+            }
+            Ok(to_expr(&expression.args[0])?.is_between(
+                to_expr(&expression.args[1])?,
+                to_expr(&expression.args[2])?,
+                ClosedInterval::Both,
+            ))
+        }
+        "rank" => Ok(one_arg(expression)?
+            .rank(
+                RankOptions {
+                    method: RankMethod::Dense,
+                    descending: false,
+                },
+                None,
+            )
+            .cast(DataType::Int64)),
+        "dense_rank" => Ok(one_arg(expression)?
+            .rank(
+                RankOptions {
+                    method: RankMethod::Dense,
+                    descending: false,
+                },
+                None,
+            )
+            .cast(DataType::Int64)),
+        "row_number" => Ok(len().cast(DataType::Int64)),
+        "cum_sum" => Ok(one_arg(expression)?.cum_sum(false)),
+        "dt_year" => Ok(one_arg(expression)?.dt().year()),
+        "dt_month" => Ok(one_arg(expression)?.dt().month()),
+        "dt_day" => Ok(one_arg(expression)?.dt().day()),
         "is_nan" => Ok(one_arg(expression)?.is_nan()),
         "is_not_nan" => Ok(one_arg(expression)?.is_not_nan()),
         "is_finite" => Ok(one_arg(expression)?.is_finite()),
         "is_infinite" => Ok(one_arg(expression)?.is_infinite()),
         name => Err(format!("unsupported native call {name:?}")),
+    }
+}
+
+fn to_join_type(name: &str) -> Result<JoinType, String> {
+    match name {
+        "inner" => Ok(JoinType::Inner),
+        "left" => Ok(JoinType::Left),
+        "right" => Ok(JoinType::Right),
+        "full" => Ok(JoinType::Full),
+        "semi" => Ok(JoinType::Semi),
+        "anti" => Ok(JoinType::Anti),
+        "cross" => Ok(JoinType::Cross),
+        name => Err(format!("unsupported native join type {name:?}")),
     }
 }
 

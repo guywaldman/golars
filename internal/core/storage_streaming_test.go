@@ -315,7 +315,7 @@ func TestParquetProjectionKeepsPartialFiltersExact(t *testing.T) {
 	}
 }
 
-func TestParquetUnsupportedFilterFallsBackToExactEvaluation(t *testing.T) {
+func TestParquetUnsupportedFilterRunsInNativePlan(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "unsupported-filter.parquet")
 	engine, err := NewEngine(WithBatchSize(2))
@@ -507,8 +507,8 @@ func TestForEachBatchAndStreamingSink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batches != 3 || rows != 4 {
-		t.Fatalf("unexpected batch stream batches=%d rows=%d", batches, rows)
+	if batches != 2 || rows != 4 {
+		t.Fatalf("unexpected native batch stream batches=%d rows=%d", batches, rows)
 	}
 	sinkPath := filepath.Join(t.TempDir(), "sink.parquet")
 	if err := df.Lazy().Filter(Col("id").Gt(Lit(int64(1)))).Sink(ctx, sinkPath); err != nil {

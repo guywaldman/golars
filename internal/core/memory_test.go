@@ -11,7 +11,7 @@ import (
 
 func TestClosedFramesReleaseArrowAllocations(t *testing.T) {
 	path := writeMemoryTestParquet(t)
-	engine, err := NewEngine(WithNativeBackend(false), WithBatchSize(8))
+	engine, err := NewEngine(WithBatchSize(8))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestClosedFramesReleaseArrowAllocations(t *testing.T) {
 }
 
 func TestQuotaAllocatorReallocateTracksShrunkCapacity(t *testing.T) {
-	engine, err := NewEngine(WithNativeBackend(false))
+	engine, err := NewEngine()
 	if err != nil {
 		t.Fatal(err)
 	}

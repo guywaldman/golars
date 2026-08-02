@@ -44,6 +44,7 @@ func newDataFrameWithNative(frame *nativebackend.Frame, engine *Engine) *DataFra
 
 func finalizeDataFrame(df *DataFrame) { df.Close() }
 
+// NewDataFrame creates an eager frame from columns.
 func NewDataFrame(columns ...*Series) (*DataFrame, error) {
 	return newDataFrame(getDefaultEngine(), columns...)
 }
@@ -86,6 +87,7 @@ func newDataFrame(engine *Engine, columns ...*Series) (*DataFrame, error) {
 	return newDataFrameWithTable(table, engine), nil
 }
 
+// DataFrameFromArrow wraps an Arrow table as a DataFrame.
 func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 	if table == nil {
 		return nil, fmt.Errorf("golars: nil Arrow table")
@@ -94,8 +96,10 @@ func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 	return newDataFrameWithTable(table, getDefaultEngine()), nil
 }
 
+// NewDataFrameFromArrow creates a DataFrame from an Arrow table.
 func NewDataFrameFromArrow(table arrow.Table) (*DataFrame, error) { return DataFrameFromArrow(table) }
 
+// DataFrameFromRecordBatch creates a DataFrame from one record batch.
 func DataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
 	if batch == nil {
 		return nil, fmt.Errorf("golars: nil Arrow record batch")
@@ -103,10 +107,12 @@ func DataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
 	return DataFrameFromRecordBatches([]arrow.RecordBatch{batch})
 }
 
+// NewDataFrameFromRecordBatch creates a DataFrame from one record batch.
 func NewDataFrameFromRecordBatch(batch arrow.RecordBatch) (*DataFrame, error) {
 	return DataFrameFromRecordBatch(batch)
 }
 
+// DataFrameFromRecordBatches creates a DataFrame from schema-compatible batches.
 func DataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
 	if len(batches) == 0 || batches[0] == nil {
 		return nil, fmt.Errorf("golars: at least one Arrow record batch is required")
@@ -124,6 +130,7 @@ func DataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error)
 	return newDataFrameWithTable(table, getDefaultEngine()), nil
 }
 
+// NewDataFrameFromRecordBatches creates a DataFrame from schema-compatible batches.
 func NewDataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, error) {
 	return DataFrameFromRecordBatches(batches)
 }
@@ -167,6 +174,7 @@ func (df *DataFrame) materialize() error {
 	return nil
 }
 
+// Schema returns the frame schema.
 func (df *DataFrame) Schema() Schema {
 	if df == nil {
 		return Schema{}
@@ -189,6 +197,8 @@ func (df *DataFrame) Schema() Schema {
 	})
 	return df.nativeSchema
 }
+
+// Height returns the number of rows.
 func (df *DataFrame) Height() int64 {
 	if df == nil {
 		return 0
@@ -201,6 +211,8 @@ func (df *DataFrame) Height() int64 {
 	}
 	return int64(df.table.NumRows())
 }
+
+// Width returns the number of columns.
 func (df *DataFrame) Width() int {
 	if df == nil {
 		return 0
@@ -213,6 +225,8 @@ func (df *DataFrame) Width() int {
 	}
 	return int(df.table.NumCols())
 }
+
+// Shape returns row and column counts.
 func (df *DataFrame) Shape() (int64, int) { return df.Height(), df.Width() }
 
 // ArrowTable returns a retained Arrow table. The caller must Release it.
@@ -224,6 +238,7 @@ func (df *DataFrame) ArrowTable() (arrow.Table, error) {
 	return df.table, nil
 }
 
+// Column returns a named column.
 func (df *DataFrame) Column(name string) (*Series, error) {
 	if err := df.ensureOpen(); err != nil {
 		return nil, err
@@ -236,6 +251,7 @@ func (df *DataFrame) Column(name string) (*Series, error) {
 	return SeriesFromArrowChunked(name, column), nil
 }
 
+// Lazy converts the eager frame to a lazy plan.
 func (df *DataFrame) Lazy() *LazyFrame {
 	if err := df.ensureOpen(); err != nil {
 		return &LazyFrame{err: err}
@@ -243,54 +259,52 @@ func (df *DataFrame) Lazy() *LazyFrame {
 	return newLazyFrame(df.engine, &planNode{kind: planTable, table: df.table}, nil)
 }
 
+// Select evaluates a projection and returns a new frame.
 func (df *DataFrame) Select(exprs ...Expr) (*DataFrame, error) {
 	plan := df.Lazy().Select(exprs...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Filter keeps rows matching predicate.
 func (df *DataFrame) Filter(predicate Expr) (*DataFrame, error) {
 	plan := df.Lazy().Filter(predicate)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// WithColumns adds or replaces columns.
 func (df *DataFrame) WithColumns(exprs ...Expr) (*DataFrame, error) {
 	plan := df.Lazy().WithColumns(exprs...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Limit returns at most n rows from the start of the frame.
 func (df *DataFrame) Limit(n int64) (*DataFrame, error) {
 	plan := df.Lazy().Limit(n)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Sort orders rows by the supplied expressions.
 func (df *DataFrame) Sort(exprs ...Expr) (*DataFrame, error) {
 	plan := df.Lazy().Sort(exprs...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Head returns the first n rows.
 func (df *DataFrame) Head(n int64) (*DataFrame, error) { return df.Limit(n) }
+
+// Tail returns the last n rows.
 func (df *DataFrame) Tail(n int64) (*DataFrame, error) {
-	if err := df.ensureOpen(); err != nil {
-		return nil, err
-	}
-	if n < 0 {
-		return nil, fmt.Errorf("%w: tail must be non-negative", ErrInvalidPlan)
-	}
-	if n >= df.Height() {
-		return DataFrameFromArrow(df.table)
-	}
-	reader := array.NewTableReader(df.table, df.Height())
-	defer reader.Release()
-	if !reader.Next() {
-		return DataFrameFromArrow(df.table)
-	}
-	record := reader.RecordBatch()
-	result := record.NewSlice(record.NumRows()-n, record.NumRows())
-	defer result.Release()
-	table := array.NewTableFromRecords(result.Schema(), []arrow.RecordBatch{result})
-	return newDataFrameWithTable(table, df.engine), nil
+	plan := df.Lazy().Tail(n)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 
+// Drop removes named columns.
 func (df *DataFrame) Drop(names ...string) (*DataFrame, error) {
 	if err := df.ensureOpen(); err != nil {
 		return nil, err
@@ -311,6 +325,7 @@ func (df *DataFrame) Drop(names ...string) (*DataFrame, error) {
 	return df.Select(exprs...)
 }
 
+// Rename changes column names using mapping.
 func (df *DataFrame) Rename(mapping map[string]string) (*DataFrame, error) {
 	if err := df.ensureOpen(); err != nil {
 		return nil, err
@@ -326,6 +341,7 @@ func (df *DataFrame) Rename(mapping map[string]string) (*DataFrame, error) {
 	return df.Select(exprs...)
 }
 
+// DropNulls removes rows with nulls in the named columns.
 func (df *DataFrame) DropNulls(names ...string) (*DataFrame, error) {
 	if len(names) == 0 {
 		names = df.Schema().Names()
@@ -342,41 +358,58 @@ func (df *DataFrame) DropNulls(names ...string) (*DataFrame, error) {
 	return df.Filter(predicate)
 }
 
+// Unique keeps one row for each distinct key.
 func (df *DataFrame) Unique(columns ...string) (*DataFrame, error) {
 	plan := df.Lazy().Unique(columns...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Explode expands list values into separate rows.
 func (df *DataFrame) Explode(columns ...string) (*DataFrame, error) {
 	plan := df.Lazy().Explode(columns...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Unnest expands struct fields into columns.
 func (df *DataFrame) Unnest(columns ...string) (*DataFrame, error) {
 	plan := df.Lazy().Unnest(columns...)
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
 
+// WriteParquet writes the frame as Parquet.
 func (df *DataFrame) WriteParquet(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteParquet(ctx, df, destination, options...)
 }
+
+// WriteCSV writes the frame as CSV.
 func (df *DataFrame) WriteCSV(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteCSV(ctx, df, destination, options...)
 }
+
+// WriteJSON writes the frame as a JSON array.
 func (df *DataFrame) WriteJSON(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteJSON(ctx, df, destination, options...)
 }
+
+// WriteNDJSON writes the frame as newline-delimited JSON.
 func (df *DataFrame) WriteNDJSON(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteNDJSON(ctx, df, destination, options...)
 }
+
+// WriteIPCFile writes the frame as an Arrow IPC file.
 func (df *DataFrame) WriteIPCFile(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteIPCFile(ctx, df, destination, options...)
 }
+
+// GroupBy starts an eager grouped aggregation.
 func (df *DataFrame) GroupBy(exprs ...Expr) *GroupBy {
 	return &GroupBy{df: df, keys: append([]Expr(nil), exprs...)}
 }
 
+// Close releases the frame's Arrow and native resources.
 func (df *DataFrame) Close() {
 	if df == nil {
 		return
@@ -408,11 +441,19 @@ type GroupBy struct {
 	keys []Expr
 }
 
+// Agg evaluates grouped aggregate expressions.
 func (g *GroupBy) Agg(exprs ...Expr) (*DataFrame, error) {
 	if g == nil || g.df == nil {
 		return nil, ErrClosed
 	}
-	return executeGroupBy(context.Background(), g.df, g.keys, exprs)
+	if err := g.df.ensureOpen(); err != nil {
+		return nil, err
+	}
+	lf := g.df.Lazy()
+	defer lf.Close()
+	plan := lf.GroupBy(g.keys...).Agg(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
 }
 
 // SortByColumns is a convenience for common column-name sorting.

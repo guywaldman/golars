@@ -37,7 +37,6 @@ func main() {
 	memoryLimit := flag.Int64("memory-limit", golars.DefaultMemoryLimit, "engine memory limit in bytes")
 	iterations := flag.Int("iterations", 5, "measured iterations")
 	warmup := flag.Int("warmup", 1, "warmup iterations")
-	nativeBackend := flag.Bool("native-backend", true, "use the bundled native backend")
 	flag.Parse()
 	if *dataset == "" {
 		fatal(fmt.Errorf("-dataset is required"))
@@ -56,7 +55,6 @@ func main() {
 		golars.WithBatchSize(*batchSize),
 		golars.WithMemoryLimit(*memoryLimit),
 		golars.WithParallelism(runtime.GOMAXPROCS(0)),
-		golars.WithNativeBackend(*nativeBackend),
 	)
 	if err != nil {
 		fatal(err)

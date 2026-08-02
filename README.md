@@ -12,13 +12,13 @@ The package bundles native dependencies such that you can install it easily (as 
 It exposes high-level DataFrame APIs, with "zero configuration" support (e.g., for reading from S3/GCS):
 
 ```go
-import gl "github.com/guywaldman/polars"
+import gl "github.com/guywaldman/golars"
 
 // ...
-df, _ := golars.ReadParquet(ctx, "events.parquet")
-summary, _ := df.GroupBy(golars.Col("country")).Agg(
-	golars.Col("amount").Sum().Alias("amount_total"),
-	golars.Col("user_id").Count().Alias("users"),
+df, _ := gl.ReadParquet(ctx, "events.parquet")
+summary, _ := df.GroupBy(gl.Col("country")).Agg(
+	gl.Col("amount").Sum().Alias("amount_total"),
+	gl.Col("user_id").Count().Alias("users"),
 )
 _ = summary.WriteCSV(ctx, "out.csv")
 ```
@@ -43,7 +43,7 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 ## Featureset
 
 - [X] Arrow-backed `DataFrame` and `Series`, with retained Arrow interop.
-- [X] Eager and lazy `Select`, `Filter`, `WithColumns`, `Limit`/`Head`, `Sort`,
+- [X] Eager and lazy `Select`, `Filter`, `WithColumns`, `Limit`/`Head`/`Tail`, `Sort`,
   `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,
   `Unnest`, `Drop`, `Rename`, and `DropNulls`.
 - [X] Expression trees with arithmetic (including modulo), comparisons, boolean logic, null handling,
@@ -68,35 +68,37 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 
 ## Native execution
 
-On supported targets, eligible local Parquet plans run through the Rust/Polars
-backend. The target-specific native library is embedded in the Go module and
-loaded with CGO-free FFI, such that consumers only need the normal `go get` and Go build
-workflow.
-Other targets and plans use the portable Go executor automatically. Applications can force the Go executor with
-`WithNativeBackend(false)`.
+All relational execution runs through the embedded Rust/Polars backend. The
+Go layer owns the public API, Arrow conversion, and storage adapters (including
+custom object stores and formats Polars does not open directly). The
+target-specific native library is embedded in the Go module and loaded with
+CGO-free FFI, so consumers only need the normal `go get` and Go build workflow.
+
+The checked-in assets currently support Linux amd64/arm64 and macOS arm64.
+A target without an embedded asset returns an explicit native-backend
+availability error; there is no portable execution fallback.
 
 ## Query planning and storage
 
 Similar to Polars:
 
-- [X] Lazy scans derive the columns required by a terminal projection and its
-  filters. Parquet reads only those Arrow columns; CSV and JSON readers apply
-  the same projection at ingestion.
-- [X] The optimized logical plan performs expression simplification, projection
-  collapse, predicate pushdown through safe projections, adjacent-filter
-  fusion, limit fusion/pushdown, type coercion, and storage predicate/projection
-  pushdown. `ExplainUnoptimized` and `ExplainOptimized` expose both forms.
+- [X] Local Parquet/CSV/IPC scans remain lazy until collection; custom object
+  stores and JSON readers are adapted to Arrow IPC before execution.
+- [X] Polars owns logical optimization, expression simplification, projection
+  and predicate pushdown, limit pushdown, type coercion, and physical planning.
+  `ExplainUnoptimized` and `ExplainOptimized` describe the Go-facing plan; the
+  native optimizer is applied during collection.
 
 ## Examples
 
 ```go
-df, err := golars.ReadCSV(ctx, "events.csv")
+df, err := gl.ReadCSV(ctx, "events.csv")
 if err != nil { return err }
 defer df.Close()
 
-summary, err := df.GroupBy(golars.Col("country")).Agg(
-	golars.Col("amount").Sum().Alias("amount_total"),
-	golars.Col("user_id").Count().Alias("users"),
+summary, err := df.GroupBy(gl.Col("country")).Agg(
+	gl.Col("amount").Sum().Alias("amount_total"),
+	gl.Col("user_id").Count().Alias("users"),
 )
 if err != nil { return err }
 defer summary.Close()
@@ -107,10 +109,10 @@ err = summary.WriteParquet(ctx, "out.parquet")
 For an explicitly configured engine:
 
 ```go
-engine, err := golars.NewEngine(
-	golars.WithMemoryLimit(512<<20),
-	golars.WithBatchSize(32<<10),
-	golars.WithObjectStore("s3", s3Store),
+engine, err := gl.NewEngine(
+	gl.WithMemoryLimit(512<<20),
+	gl.WithBatchSize(32<<10),
+	gl.WithObjectStore("s3", s3Store),
 )
 if err != nil { return err }
 defer engine.Close()
@@ -126,10 +128,9 @@ public type names and richer Polars parity surface will continue to grow.
 
 - `golars.go` is the small public compatibility facade. It aliases the public
   types and forwards constructors/functions to the implementation package.
-- `internal/core` owns the tightly coupled public API implementation,
-  logical-plan/execution kernels, and white-box tests. Keeping that package
-  together avoids artificial import cycles while keeping the module root free
-  of implementation files.
+- `internal/core` owns the tightly coupled public API implementation, logical
+  plan bridge, Arrow conversion, storage integration, and white-box tests.
+  Relational execution is delegated to the native Polars library.
 - `internal/arrowutil` contains shared Arrow ownership and scalar helpers;
   `internal/jsonio` handles JSON inference and encoding; `internal/ipcio`
   handles Arrow IPC file readers.
@@ -147,35 +148,46 @@ commands, E2E requirements, and benchmark workflow.
 ## Performance and Benchmarks
 
 The [`benchmarks`](benchmarks) directory contains equivalent Go and Rust
+Polars workloads. The following run was captured on 2026-08-03 on a MacBook
+Pro with an Apple M3 Max (16 cores, 128 GB RAM), using Go 1.26.4, Rust 1.96.0,
+Polars 0.52.0, and 16 threads for both implementations. Each cell is
+`golars / polars` in milliseconds per execution, followed by the golars-to-
+polars ratio.
 
-These are some results on an M3 Max MacBook Pro with 128 GiB RAM and 16 cores at varying scales (format indicates golars/polars):
+Each implementation had one unmeasured warmup and three measured executions.
+The Go side used `-benchtime=3x`; the Rust side used `--warmup 1
+--iterations 3`.
 
 | Input Rows | Projection | Filter + Select | Grouped Aggregation | Window Aggregation | Self Join |
 |---:|---:|---:|---:|---:|---:|
-| 5K | 0.558 / 0.353 (1.58x) | 0.546 / 0.439 (1.24x) | 1.578 / 1.313 (1.20x) | 1.048 / 0.876 (1.20x) | 7.301 / 2.136 (3.42x) |
-| 10K | 0.500 / 0.422 (1.19x) | 0.411 / 0.391 (1.05x) | 0.831 / 0.873 (0.95x) | 1.177 / 1.072 (1.10x) | 7.561 / 1.723 (4.39x) |
-| 200K | 0.962 / 1.008 (0.95x) | 0.562 / 0.515 (1.09x) | 1.275 / 1.356 (0.94x) | 9.604 / 1.667 (5.76x) | 11.638 / 1.868 (6.23x) |
-| 500K | 1.402 / 1.301 (1.08x) | 0.681 / 0.573 (1.19x) | 1.863 / 1.882 (0.99x) | 17.097 / 2.388 (7.16x) | 10.906 / 2.405 (4.54x) |
-| 1M | 1.610 / 1.688 (0.95x) | 1.007 / 0.932 (1.08x) | 2.718 / 2.527 (1.08x) | 32.209 / 3.381 (9.53x) | 11.554 / 3.151 (3.67x) |
-| 5M | 5.769 / 5.833 (0.99x) | 2.271 / 2.271 (1.00x) | 4.994 / 5.070 (0.98x) | 229.646 / 15.214 (15.09x) | 13.001 / 7.967 (1.63x) |
+| 5K | 0.592 / 0.349 (1.69x) | 0.523 / 0.377 (1.39x) | 0.925 / 0.867 (1.07x) | 0.900 / 1.136 (0.79x) | 2.157 / 1.913 (1.13x) |
+| 10K | 0.731 / 0.406 (1.80x) | 0.802 / 0.362 (2.22x) | 0.902 / 0.812 (1.11x) | 1.039 / 0.998 (1.04x) | 2.330 / 1.541 (1.51x) |
+| 200K | 1.061 / 0.771 (1.38x) | 0.694 / 0.484 (1.43x) | 1.365 / 1.296 (1.05x) | 1.579 / 1.575 (1.00x) | 2.400 / 1.749 (1.37x) |
+| 500K | 1.658 / 1.176 (1.41x) | 0.900 / 0.639 (1.41x) | 1.745 / 1.655 (1.05x) | 2.013 / 2.587 (0.78x) | 3.164 / 2.794 (1.13x) |
+| 1M | 2.093 / 1.729 (1.21x) | 1.054 / 0.872 (1.21x) | 2.417 / 2.299 (1.05x) | 3.330 / 3.423 (0.97x) | 3.457 / 3.102 (1.11x) |
+| 5M | 5.248 / 5.349 (0.98x) | 2.136 / 2.163 (0.99x) | 5.463 / 4.763 (1.15x) | 13.530 / 13.562 (1.00x) | 9.485 / 8.038 (1.18x) |
 
-For a 1M row dataset:
+For the 1M-row dataset, the complete workload set was:
 
 | Workload | golars ms/op | polars ms/op | ratio | golars B/op | polars RSS delta | rows |
 |---|---:|---:|---:|---:|---:|---:|
-| `projection_only` | 1.610 | 1.688 | 0.95x | 3,306 | 33.2 MiB | 1,000,000 |
-| `filter_select` | 1.007 | 0.932 | 1.08x | 4,826 | 6.6 MiB | 500,000 |
-| `compound_filter` | 1.138 | 0.974 | 1.17x | 6,762 | 2.5 MiB | 15,625 |
-| `derived_projection` | 2.273 | 2.251 | 1.01x | 9,162 | 28.4 MiB | 500,000 |
-| `grouped_aggregation` | 2.718 | 2.527 | 1.08x | 5,642 | 20.4 MiB | 128 |
-| `multi_aggregation` | 3.495 | 3.772 | 0.93x | 7,914 | 18.1 MiB | 32 |
-| `string_filter` | 1.819 | 2.050 | 0.89x | 5,242 | 17.1 MiB | 10,000 |
-| `limit_pushdown` | 0.855 | 0.922 | 0.93x | 7,746 | 4.1 MiB | 1,000 |
-| `sorted_topk` | 5.309 | 5.287 | 1.00x | 7,194 | 12.4 MiB | 100 |
-| `window_aggregation` | 32.209 | 3.381 | 9.53x | 408,630,405 | 15.6 MiB | 500,000 |
-| `self_join` | 11.554 | 3.151 | 3.67x | 59,484,768 | 36.9 MiB | 125,008 |
-| `unique_tenant` | 18.793 | 4.828 | 3.89x | 229,897,232 | 21.8 MiB | 32 |
-| `full_aggregation` | 6.274 | 5.608 | 1.12x | 6,042 | 25.7 MiB | 32 |
+| `projection_only` | 2.093 | 1.729 | 1.21x | 2,322 | 36.2 MiB | 1,000,000 |
+| `filter_select` | 1.054 | 0.872 | 1.21x | 3,586 | 6.2 MiB | 500,000 |
+| `compound_filter` | 1.056 | 0.843 | 1.25x | 5,034 | 3.0 MiB | 15,625 |
+| `derived_projection` | 2.349 | 1.956 | 1.20x | 7,194 | 30.5 MiB | 500,000 |
+| `grouped_aggregation` | 2.417 | 2.299 | 1.05x | 4,178 | 26.0 MiB | 128 |
+| `multi_aggregation` | 3.191 | 3.169 | 1.01x | 5,842 | 17.6 MiB | 32 |
+| `string_filter` | 1.807 | 1.830 | 0.99x | 3,898 | 19.1 MiB | 10,000 |
+| `limit_pushdown` | 0.786 | 0.806 | 0.98x | 4,642 | 2.8 MiB | 1,000 |
+| `sorted_topk` | 4.656 | 5.051 | 0.92x | 5,682 | 13.0 MiB | 100 |
+| `window_aggregation` | 3.330 | 3.423 | 0.97x | 6,186 | 13.0 MiB | 500,000 |
+| `self_join` | 3.457 | 3.102 | 1.11x | 10,482 | 31.5 MiB | 125,008 |
+| `unique_tenant` | 4.404 | 4.757 | 0.93x | 3,421 | 20.8 MiB | 32 |
+| `full_aggregation` | 5.106 | 5.341 | 0.96x | 4,330 | 19.6 MiB | 32 |
+
+Go's `B/op` is the allocation metric reported by `go test`; the Polars column
+is the process RSS increase reported by the Rust runner, so those two memory
+figures are directional rather than directly interchangeable.
 
 To reproduce this exact scale sweep with explicit thread parity:
 

@@ -20,6 +20,7 @@ const (
 	planFilter
 	planWithColumns
 	planLimit
+	planTail
 	planSort
 	planGroupBy
 	planJoin
@@ -55,14 +56,6 @@ type recordSource interface {
 	RecordBatch() arrow.RecordBatch
 	Err() error
 	Release()
-}
-
-type filterGuaranteeSource interface {
-	FiltersFullyMatch() bool
-}
-
-type filterColumnGuaranteeSource interface {
-	GuaranteedFilterColumns() []string
 }
 
 // LazyFrame is a deferred logical plan. Constructing transformations does not
@@ -111,18 +104,23 @@ func (lf *LazyFrame) append(kind planKind, exprs []Expr, limit int64) *LazyFrame
 	return newLazyFrame(lf.engine, &planNode{kind: kind, input: lf.plan, exprs: exprs, limit: limit}, nil)
 }
 
+// Select adds a projection to the lazy plan.
 func (lf *LazyFrame) Select(exprs ...Expr) *LazyFrame {
 	if len(exprs) == 0 {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: Select needs at least one expression", ErrInvalidPlan))
 	}
 	return lf.append(planSelect, append([]Expr(nil), exprs...), 0)
 }
+
+// Filter adds a row predicate to the lazy plan.
 func (lf *LazyFrame) Filter(predicate Expr) *LazyFrame {
 	if !predicate.IsValid() {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: invalid filter expression", ErrInvalidPlan))
 	}
 	return lf.append(planFilter, []Expr{predicate}, 0)
 }
+
+// WithColumns adds or replaces columns in the lazy plan.
 func (lf *LazyFrame) WithColumns(exprs ...Expr) *LazyFrame {
 	if len(exprs) == 0 {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: WithColumns needs at least one expression", ErrInvalidPlan))
@@ -130,6 +128,7 @@ func (lf *LazyFrame) WithColumns(exprs ...Expr) *LazyFrame {
 	return lf.append(planWithColumns, append([]Expr(nil), exprs...), 0)
 }
 
+// Unique keeps one row for each distinct key.
 func (lf *LazyFrame) Unique(columns ...string) *LazyFrame {
 	if len(columns) == 0 {
 		columns = nil
@@ -137,10 +136,12 @@ func (lf *LazyFrame) Unique(columns ...string) *LazyFrame {
 	return lf.appendColumns(planUnique, columns)
 }
 
+// Explode expands list values into separate rows.
 func (lf *LazyFrame) Explode(columns ...string) *LazyFrame {
 	return lf.appendColumns(planExplode, columns)
 }
 
+// Unnest expands struct fields into columns.
 func (lf *LazyFrame) Unnest(columns ...string) *LazyFrame {
 	return lf.appendColumns(planUnnest, columns)
 }
@@ -157,28 +158,46 @@ func (lf *LazyFrame) appendColumns(kind planKind, columns []string) *LazyFrame {
 	}
 	return newLazyFrame(lf.engine, &planNode{kind: kind, input: lf.plan, columns: append([]string(nil), columns...)}, nil)
 }
+
+// Limit adds a row limit to the lazy plan.
 func (lf *LazyFrame) Limit(n int64) *LazyFrame {
 	if n < 0 {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: limit must be non-negative", ErrInvalidPlan))
 	}
 	return lf.append(planLimit, nil, n)
 }
+
+// Head adds a limit for the first n rows.
 func (lf *LazyFrame) Head(n int64) *LazyFrame { return lf.Limit(n) }
+
+// Tail adds a limit for the last n rows.
+func (lf *LazyFrame) Tail(n int64) *LazyFrame {
+	if n < 0 {
+		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: tail must be non-negative", ErrInvalidPlan))
+	}
+	return lf.append(planTail, nil, n)
+}
+
+// Sort adds ordering expressions to the lazy plan.
 func (lf *LazyFrame) Sort(exprs ...Expr) *LazyFrame {
 	if len(exprs) == 0 {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: Sort needs at least one expression", ErrInvalidPlan))
 	}
 	return lf.append(planSort, append([]Expr(nil), exprs...), 0)
 }
+
+// GroupBy starts a lazy grouped aggregation.
 func (lf *LazyFrame) GroupBy(keys ...Expr) *LazyGroupBy {
 	return &LazyGroupBy{lf: lf, keys: append([]Expr(nil), keys...)}
 }
 
+// LazyGroupBy builds a deferred grouped aggregation.
 type LazyGroupBy struct {
 	lf   *LazyFrame
 	keys []Expr
 }
 
+// Agg adds grouped aggregate expressions to the lazy plan.
 func (g *LazyGroupBy) Agg(exprs ...Expr) *LazyFrame {
 	if g == nil || g.lf == nil {
 		return &LazyFrame{err: ErrClosed}
@@ -192,6 +211,7 @@ func (g *LazyGroupBy) Agg(exprs ...Expr) *LazyFrame {
 	return newLazyFrame(g.lf.engine, &planNode{kind: planGroupBy, input: g.lf.plan, keys: g.keys, exprs: exprs}, nil)
 }
 
+// Collect executes the lazy plan and returns an eager DataFrame.
 func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -209,28 +229,12 @@ func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 		return nil, err
 	}
 	defer recoverMemoryLimit(&err)
-	optimizedPlan := optimizePlan(lf.plan)
-	if native, handled, nativeErr := tryNativeCollect(ctx, lf.engine, optimizedPlan); handled {
-		if nativeErr != nil {
-			return nil, nativeErr
-		}
-		return native, nil
-	}
-	if containsJoin(optimizedPlan) || containsWindow(optimizedPlan) || containsMaterializing(optimizedPlan) {
-		return collectBlockingPlan(ctx, lf.engine, optimizedPlan)
-	}
-	executionFrame := &LazyFrame{engine: lf.engine, plan: optimizedPlan}
-	table, err := executionFrame.execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return newDataFrameWithTable(table, lf.engine), nil
+	return collectNative(ctx, lf.engine, lf.plan)
 }
 
-// ForEachBatch executes a lazy plan incrementally. The callback receives a
-// borrowed record batch that remains valid for the duration of the callback;
-// retain it if it must outlive the callback. This is the streaming escape hatch
-// for scans that should not first materialize a complete DataFrame.
+// ForEachBatch executes the plan in Polars and iterates its Arrow result in
+// batches. The callback receives a borrowed record batch that remains valid for
+// the duration of the callback; retain it if it must outlive the callback.
 func (lf *LazyFrame) ForEachBatch(ctx context.Context, callback func(arrow.RecordBatch) error) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -254,31 +258,34 @@ func (lf *LazyFrame) ForEachBatch(ctx context.Context, callback func(arrow.Recor
 	if lf.plan == nil {
 		return ErrInvalidPlan
 	}
-	if containsJoin(optimizePlan(lf.plan)) || containsWindow(optimizePlan(lf.plan)) || containsMaterializing(optimizePlan(lf.plan)) {
-		df, collectErr := lf.Collect(ctx)
-		if collectErr != nil {
-			return collectErr
-		}
-		defer df.Close()
-		reader := newTableSource(df.table, lf.engine.batchSize)
-		defer reader.Release()
-		for reader.Next() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			batch := reader.RecordBatch()
-			batch.Retain()
-			callbackErr := callback(batch)
-			batch.Release()
-			if callbackErr != nil {
-				return callbackErr
-			}
-		}
-		return reader.Err()
+	df, collectErr := lf.Collect(ctx)
+	if collectErr != nil {
+		return collectErr
 	}
-	return lf.executeBatches(ctx, callback)
+	defer df.Close()
+	table, tableErr := df.ArrowTable()
+	if tableErr != nil {
+		return tableErr
+	}
+	defer table.Release()
+	reader := newTableSource(table, lf.engine.batchSize)
+	defer reader.Release()
+	for reader.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		batch := reader.RecordBatch()
+		batch.Retain()
+		callbackErr := callback(batch)
+		batch.Release()
+		if callbackErr != nil {
+			return callbackErr
+		}
+	}
+	return reader.Err()
 }
 
+// Sink executes the plan and chooses a writer from destination's extension.
 func (lf *LazyFrame) Sink(ctx context.Context, destination string, options ...WriteOption) error {
 	if format, ok := formatForPath(destination); ok {
 		switch format {
@@ -297,25 +304,37 @@ func (lf *LazyFrame) Sink(ctx context.Context, destination string, options ...Wr
 	return writeParquetBatches(ctx, lf, destination, options...)
 }
 
+// SinkParquet executes the plan and writes Parquet.
 func (lf *LazyFrame) SinkParquet(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeParquetBatches(ctx, lf, destination, options...)
 }
+
+// SinkCSV executes the plan and writes CSV.
 func (lf *LazyFrame) SinkCSV(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeCSVBatches(ctx, lf, destination, options...)
 }
+
+// SinkJSON executes the plan and writes a JSON array.
 func (lf *LazyFrame) SinkJSON(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeJSONBatches(ctx, lf, destination, true, options...)
 }
+
+// SinkNDJSON executes the plan and writes newline-delimited JSON.
 func (lf *LazyFrame) SinkNDJSON(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeJSONBatches(ctx, lf, destination, false, options...)
 }
+
+// SinkIPCFile executes the plan and writes an Arrow IPC file.
 func (lf *LazyFrame) SinkIPCFile(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeIPCBatches(ctx, lf, destination, true, options...)
 }
+
+// SinkIPCStream executes the plan and writes an Arrow IPC stream.
 func (lf *LazyFrame) SinkIPCStream(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeIPCBatches(ctx, lf, destination, false, options...)
 }
 
+// CollectBatches executes the plan and returns retained Arrow record batches.
 func (lf *LazyFrame) CollectBatches(ctx context.Context) ([]arrow.RecordBatch, error) {
 	var batches []arrow.RecordBatch
 	err := lf.ForEachBatch(ctx, func(batch arrow.RecordBatch) error {
@@ -332,6 +351,7 @@ func (lf *LazyFrame) CollectBatches(ctx context.Context) ([]arrow.RecordBatch, e
 	return batches, nil
 }
 
+// Schema executes the plan and returns its result schema.
 func (lf *LazyFrame) Schema() (Schema, error) {
 	df, err := lf.Collect(context.Background())
 	if err != nil {
@@ -341,19 +361,22 @@ func (lf *LazyFrame) Schema() (Schema, error) {
 	return df.Schema(), nil
 }
 
+// Explain returns the optimized-facing plan description.
 func (lf *LazyFrame) Explain() string {
 	return lf.ExplainOptimized()
 }
 
+// ExplainUnoptimized returns the Go-facing plan before native collection.
 func (lf *LazyFrame) ExplainUnoptimized() string {
-	return lf.explainPlan(false)
+	return lf.explainPlan()
 }
 
+// ExplainOptimized returns the Go-facing plan sent to the native optimizer.
 func (lf *LazyFrame) ExplainOptimized() string {
-	return lf.explainPlan(true)
+	return lf.explainPlan()
 }
 
-func (lf *LazyFrame) explainPlan(optimized bool) string {
+func (lf *LazyFrame) explainPlan() string {
 	if lf == nil || lf.closed.Load() {
 		return "<closed>"
 	}
@@ -361,9 +384,6 @@ func (lf *LazyFrame) explainPlan(optimized bool) string {
 		return "ERROR: " + lf.err.Error()
 	}
 	plan := lf.plan
-	if optimized {
-		plan = optimizePlan(plan)
-	}
 	var nodes []string
 	for node := plan; node != nil; node = node.input {
 		switch node.kind {
@@ -379,6 +399,8 @@ func (lf *LazyFrame) explainPlan(optimized bool) string {
 			nodes = append(nodes, "WITH_COLUMNS "+formatExprList(node.exprs))
 		case planLimit:
 			nodes = append(nodes, fmt.Sprintf("LIMIT %d", node.limit))
+		case planTail:
+			nodes = append(nodes, fmt.Sprintf("TAIL %d", node.limit))
 		case planSort:
 			nodes = append(nodes, "SORT "+formatExprList(node.exprs))
 		case planGroupBy:
@@ -411,6 +433,7 @@ func formatStringList(values []string) string {
 	return "[" + strings.Join(values, ", ") + "]"
 }
 
+// Close releases retained plan resources.
 func (lf *LazyFrame) Close() {
 	if lf == nil {
 		return
@@ -429,53 +452,3 @@ func (lf *LazyFrame) Close() {
 // Release is an alias for Close for consistency with Arrow's reference-counted
 // objects. Close remains the preferred name in ordinary Go code.
 func (lf *LazyFrame) Release() { lf.Close() }
-
-func containsJoin(node *planNode) bool {
-	if node == nil {
-		return false
-	}
-	if node.kind == planJoin {
-		return true
-	}
-	return containsJoin(node.input) || containsJoin(node.right)
-}
-
-func containsWindow(node *planNode) bool {
-	if node == nil {
-		return false
-	}
-	expressions := append(append(append([]Expr{}, node.exprs...), node.keys...), node.leftKeys...)
-	expressions = append(expressions, node.rightKeys...)
-	for _, expr := range expressions {
-		if containsWindowExpr(expr.node) {
-			return true
-		}
-	}
-	return containsWindow(node.input) || containsWindow(node.right)
-}
-
-func containsWindowExpr(node *exprNode) bool {
-	if node == nil {
-		return false
-	}
-	if len(node.windowKeys) != 0 {
-		return true
-	}
-	for _, arg := range node.args {
-		if containsWindowExpr(arg) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsMaterializing(node *planNode) bool {
-	if node == nil {
-		return false
-	}
-	switch node.kind {
-	case planGroupBy, planSort, planUnique, planExplode, planUnnest:
-		return true
-	}
-	return containsMaterializing(node.input) || containsMaterializing(node.right)
-}

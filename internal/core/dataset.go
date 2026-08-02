@@ -11,18 +11,23 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/guywaldman/golars/internal/arrowutil"
 	"github.com/guywaldman/golars/internal/storageuri"
 )
 
+// DatasetMode controls whether a dataset is created or appended to.
 type DatasetMode uint8
 
 const (
+	// DatasetCreate creates a new dataset.
 	DatasetCreate DatasetMode = iota
+	// DatasetAppend appends files to an existing dataset.
 	DatasetAppend
 )
 
+// DatasetWriteOption configures a dataset sink.
 type DatasetWriteOption func(*datasetWriteConfig)
 
 type datasetWriteConfig struct {
@@ -31,12 +36,41 @@ type datasetWriteConfig struct {
 	rowsPerFile int64
 }
 
+func reorderRecord(ctx context.Context, engine *Engine, batch arrow.RecordBatch, indices []int) (arrow.RecordBatch, error) {
+	indexBuilder := array.NewInt64Builder(engine.allocator)
+	indexBuilder.Reserve(len(indices))
+	for _, index := range indices {
+		indexBuilder.Append(int64(index))
+	}
+	index := indexBuilder.NewArray()
+	indexBuilder.Release()
+	defer index.Release()
+
+	columns := make([]arrow.Array, batch.NumCols())
+	for i := range columns {
+		column, err := compute.TakeArray(compute.WithAllocator(ctx, engine.allocator), batch.Column(i), index)
+		if err != nil {
+			arrowutil.ReleaseArrays(columns)
+			return nil, err
+		}
+		columns[i] = column
+	}
+	record := array.NewRecordBatch(batch.Schema(), columns, int64(index.Len()))
+	arrowutil.ReleaseArrays(columns)
+	return record, nil
+}
+
+// WithPartitionBy sets dataset partition columns.
 func WithPartitionBy(columns ...string) DatasetWriteOption {
 	return func(config *datasetWriteConfig) { config.partitionBy = append([]string(nil), columns...) }
 }
+
+// WithDatasetMode sets the dataset creation mode.
 func WithDatasetMode(mode DatasetMode) DatasetWriteOption {
 	return func(config *datasetWriteConfig) { config.mode = mode }
 }
+
+// WithRowsPerFile sets the target rows per dataset file.
 func WithRowsPerFile(rows int64) DatasetWriteOption {
 	return func(config *datasetWriteConfig) {
 		if rows > 0 {
@@ -135,7 +169,7 @@ func WriteParquetDataset(ctx context.Context, df *DataFrame, destination string,
 			for i := range selected {
 				selected[i] = indices[offset+int64(i)]
 			}
-			part, _, err := reorderRecord(ctx, df.engine, batch, selected)
+			part, err := reorderRecord(ctx, df.engine, batch, selected)
 			if err != nil {
 				return err
 			}

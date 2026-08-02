@@ -14,18 +14,20 @@ import (
 	"google.golang.org/api/option"
 )
 
+// DefaultMemoryLimit is the default per-engine memory quota in bytes.
 const DefaultMemoryLimit int64 = 1 << 30
 
+// EngineOption configures an Engine.
 type EngineOption func(*engineConfig) error
 
 type engineConfig struct {
 	memoryLimit int64
 	parallelism int
 	batchSize   int64
-	native      bool
 	stores      map[string]internalstorage.ObjectStore
 }
 
+// WithObjectStore registers a store for a URI scheme on an Engine.
 func WithObjectStore(scheme string, store ObjectStore) EngineOption {
 	return func(c *engineConfig) error {
 		scheme = strings.ToLower(strings.TrimSuffix(scheme, "://"))
@@ -40,6 +42,7 @@ func WithObjectStore(scheme string, store ObjectStore) EngineOption {
 	}
 }
 
+// WithMemoryLimit sets the engine memory quota in bytes.
 func WithMemoryLimit(bytes int64) EngineOption {
 	return func(c *engineConfig) error {
 		if bytes <= 0 {
@@ -50,6 +53,7 @@ func WithMemoryLimit(bytes int64) EngineOption {
 	}
 }
 
+// WithParallelism sets the engine's parallelism hint.
 func WithParallelism(n int) EngineOption {
 	return func(c *engineConfig) error {
 		if n <= 0 {
@@ -60,21 +64,13 @@ func WithParallelism(n int) EngineOption {
 	}
 }
 
+// WithBatchSize sets the preferred Arrow batch size.
 func WithBatchSize(rows int64) EngineOption {
 	return func(c *engineConfig) error {
 		if rows <= 0 {
 			return fmt.Errorf("golars: batch size must be positive")
 		}
 		c.batchSize = rows
-		return nil
-	}
-}
-
-// WithNativeBackend controls use of the bundled native execution backend for
-// plans it supports. Unsupported platforms and plans always use the Go path.
-func WithNativeBackend(enabled bool) EngineOption {
-	return func(c *engineConfig) error {
-		c.native = enabled
 		return nil
 	}
 }
@@ -128,15 +124,15 @@ type Engine struct {
 	allocator   *quotaAllocator
 	parallelism int
 	batchSize   int64
-	native      bool
 	stores      map[string]internalstorage.ObjectStore
 	managed     []io.Closer
 	storeMu     sync.RWMutex
 	closed      atomic.Bool
 }
 
+// NewEngine creates an execution engine with the supplied options.
 func NewEngine(options ...EngineOption) (*Engine, error) {
-	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, native: true, stores: make(map[string]internalstorage.ObjectStore)}
+	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, stores: make(map[string]internalstorage.ObjectStore)}
 	for _, option := range options {
 		if err := option(&config); err != nil {
 			return nil, err
@@ -146,18 +142,23 @@ func NewEngine(options ...EngineOption) (*Engine, error) {
 		allocator:   &quotaAllocator{base: memory.NewGoAllocator(), limit: config.memoryLimit},
 		parallelism: config.parallelism,
 		batchSize:   config.batchSize,
-		native:      config.native,
 		stores:      config.stores,
 	}, nil
 }
 
+// MemoryLimit returns the engine memory quota in bytes.
 func (e *Engine) MemoryLimit() int64 { return e.allocator.limit }
-func (e *Engine) MemoryUsed() int64  { return e.allocator.used.Load() }
-func (e *Engine) Parallelism() int   { return e.parallelism }
-func (e *Engine) BatchSize() int64   { return e.batchSize }
-func (e *Engine) NativeBackendEnabled() bool {
-	return e != nil && e.native
-}
+
+// MemoryUsed returns the currently accounted bytes.
+func (e *Engine) MemoryUsed() int64 { return e.allocator.used.Load() }
+
+// Parallelism returns the configured parallelism hint.
+func (e *Engine) Parallelism() int { return e.parallelism }
+
+// BatchSize returns the preferred Arrow batch size.
+func (e *Engine) BatchSize() int64 { return e.batchSize }
+
+// Close releases engine-owned stores and prevents new work.
 func (e *Engine) Close() {
 	if e == nil || e.closed.Swap(true) {
 		return
@@ -171,6 +172,7 @@ func (e *Engine) Close() {
 	}
 }
 
+// ObjectStore returns the store registered for scheme.
 func (e *Engine) ObjectStore(scheme string) (ObjectStore, bool) {
 	if e == nil {
 		return nil, false
@@ -181,6 +183,7 @@ func (e *Engine) ObjectStore(scheme string) (ObjectStore, bool) {
 	return store, ok
 }
 
+// RegisterObjectStore adds a store to this engine.
 func (e *Engine) RegisterObjectStore(scheme string, store ObjectStore) error {
 	if e == nil || store == nil {
 		return fmt.Errorf("golars: object store and engine are required")

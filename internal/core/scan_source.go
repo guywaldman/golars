@@ -185,21 +185,14 @@ func formatExtension(format formatKind) string {
 }
 
 type fileSource struct {
-	reader            recordSource
-	closers           []io.Closer
-	filtersFullyMatch bool
+	reader  recordSource
+	closers []io.Closer
 }
 
 func (s *fileSource) Schema() *arrow.Schema          { return s.reader.Schema() }
 func (s *fileSource) Next() bool                     { return s.reader.Next() }
 func (s *fileSource) RecordBatch() arrow.RecordBatch { return s.reader.RecordBatch() }
 func (s *fileSource) Err() error                     { return s.reader.Err() }
-func (s *fileSource) FiltersFullyMatch() bool {
-	if source, ok := s.reader.(filterGuaranteeSource); ok {
-		return source.FiltersFullyMatch()
-	}
-	return s.filtersFullyMatch
-}
 func (s *fileSource) Release() {
 	if s.reader != nil {
 		s.reader.Release()
@@ -295,32 +288,6 @@ func (s *multiSource) Next() bool {
 }
 func (s *multiSource) RecordBatch() arrow.RecordBatch { return s.current.RecordBatch() }
 func (s *multiSource) Err() error                     { return s.err }
-func (s *multiSource) FiltersFullyMatch() bool {
-	if source, ok := s.current.(filterGuaranteeSource); ok {
-		return source.FiltersFullyMatch()
-	}
-	return false
-}
-func (s *multiSource) GuaranteedFilterColumns() []string {
-	if source, ok := s.current.(filterColumnGuaranteeSource); ok {
-		return source.GuaranteedFilterColumns()
-	}
-	return nil
-}
-func (s *multiSource) PrefetchesBatches() bool {
-	if s.current != nil {
-		if source, ok := s.current.(interface{ PrefetchesBatches() bool }); ok {
-			return source.PrefetchesBatches()
-		}
-		return false
-	}
-	if len(s.sources) == 1 {
-		if source, ok := s.sources[0].(interface{ PrefetchesBatches() bool }); ok {
-			return source.PrefetchesBatches()
-		}
-	}
-	return false
-}
 func (s *multiSource) Release() {
 	if s.current != nil {
 		s.current.Release()
