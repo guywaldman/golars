@@ -53,7 +53,13 @@ func newScanLazyFrameWithEngine(engine *Engine, path string, format formatKind, 
 		}
 		return newMultiSource(ctx, engine, paths, format, config)
 	}
-	return newLazyFrame(engine, &planNode{kind: planSource, source: factory}, nil)
+	return newLazyFrame(engine, &planNode{
+		kind:         planSource,
+		source:       factory,
+		sourcePath:   path,
+		sourceFormat: format,
+		sourceConfig: config,
+	}, nil)
 }
 
 func scanReader(reader io.Reader, format formatKind, options ...ScanOption) *LazyFrame {

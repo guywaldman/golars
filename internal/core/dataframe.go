@@ -8,15 +8,20 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	nativebackend "github.com/guywaldman/golars/internal/native"
 )
 
 // DataFrame is an eager, immutable Arrow-backed table. Operations return new
 // frames and do not mutate their receiver. Close releases its Arrow reference
 // deterministically; the finalizer is only a safety net.
 type DataFrame struct {
-	table  arrow.Table
-	engine *Engine
-	once   sync.Once
+	table          arrow.Table
+	native         *nativebackend.Frame
+	engine         *Engine
+	once           sync.Once
+	materializeMu  sync.Mutex
+	nativeSchema   Schema
+	nativeSchemaMu sync.Once
 }
 
 func newDataFrameWithTable(table arrow.Table, engine *Engine) *DataFrame {
@@ -24,6 +29,15 @@ func newDataFrameWithTable(table arrow.Table, engine *Engine) *DataFrame {
 		engine = getDefaultEngine()
 	}
 	df := &DataFrame{table: table, engine: engine}
+	runtime.SetFinalizer(df, finalizeDataFrame)
+	return df
+}
+
+func newDataFrameWithNative(frame *nativebackend.Frame, engine *Engine) *DataFrame {
+	if engine == nil {
+		engine = getDefaultEngine()
+	}
+	df := &DataFrame{native: frame, engine: engine}
 	runtime.SetFinalizer(df, finalizeDataFrame)
 	return df
 }
@@ -115,27 +129,87 @@ func NewDataFrameFromRecordBatches(batches []arrow.RecordBatch) (*DataFrame, err
 }
 
 func (df *DataFrame) ensureOpen() error {
-	if df == nil || df.table == nil {
+	if df == nil {
 		return ErrClosed
 	}
-	return df.engine.checkOpen()
+	if df.engine == nil {
+		return ErrClosed
+	}
+	if err := df.engine.checkOpen(); err != nil {
+		return err
+	}
+	return df.materialize()
+}
+
+func (df *DataFrame) materialize() error {
+	if df == nil {
+		return ErrClosed
+	}
+	df.materializeMu.Lock()
+	defer df.materializeMu.Unlock()
+	if df.table != nil {
+		return nil
+	}
+	if df.native == nil {
+		return ErrClosed
+	}
+	data, err := df.native.IPC()
+	if err != nil {
+		return err
+	}
+	table, err := tableFromNativeIPC(data, df.engine.allocator)
+	if err != nil {
+		return err
+	}
+	df.table = table
+	df.native.Close()
+	df.native = nil
+	return nil
 }
 
 func (df *DataFrame) Schema() Schema {
-	if df == nil || df.table == nil {
+	if df == nil {
 		return Schema{}
 	}
-	return SchemaFromArrow(df.table.Schema())
+	if df.table != nil {
+		return SchemaFromArrow(df.table.Schema())
+	}
+	if df.native == nil {
+		return Schema{}
+	}
+	df.nativeSchemaMu.Do(func() {
+		data, err := df.native.SchemaIPC()
+		if err != nil {
+			return
+		}
+		schema, err := schemaFromNativeIPC(data)
+		if err == nil {
+			df.nativeSchema = SchemaFromArrow(schema)
+		}
+	})
+	return df.nativeSchema
 }
 func (df *DataFrame) Height() int64 {
-	if df == nil || df.table == nil {
+	if df == nil {
 		return 0
+	}
+	if df.table == nil {
+		if df.native == nil {
+			return 0
+		}
+		return df.native.Height()
 	}
 	return int64(df.table.NumRows())
 }
 func (df *DataFrame) Width() int {
-	if df == nil || df.table == nil {
+	if df == nil {
 		return 0
+	}
+	if df.table == nil {
+		if df.native == nil {
+			return 0
+		}
+		return df.native.Width()
 	}
 	return int(df.table.NumCols())
 }
@@ -163,8 +237,8 @@ func (df *DataFrame) Column(name string) (*Series, error) {
 }
 
 func (df *DataFrame) Lazy() *LazyFrame {
-	if df == nil || df.table == nil {
-		return &LazyFrame{err: ErrClosed}
+	if err := df.ensureOpen(); err != nil {
+		return &LazyFrame{err: err}
 	}
 	return newLazyFrame(df.engine, &planNode{kind: planTable, table: df.table}, nil)
 }
@@ -309,9 +383,17 @@ func (df *DataFrame) Close() {
 	}
 	runtime.SetFinalizer(df, nil)
 	df.once.Do(func() {
-		if df.table != nil {
-			df.table.Release()
-			df.table = nil
+		df.materializeMu.Lock()
+		table := df.table
+		df.table = nil
+		native := df.native
+		df.native = nil
+		df.materializeMu.Unlock()
+		if table != nil {
+			table.Release()
+		}
+		if native != nil {
+			native.Close()
 		}
 	})
 }

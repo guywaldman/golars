@@ -1,2 +1,3 @@
 benchmarks/polars/target/
 benchmarks/*.parquet
+internal/native/rust/target/

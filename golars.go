@@ -180,6 +180,9 @@ func WithObjectStore(scheme string, store ObjectStore) EngineOption {
 func WithMemoryLimit(bytes int64) EngineOption { return core.WithMemoryLimit(bytes) }
 func WithParallelism(n int) EngineOption       { return core.WithParallelism(n) }
 func WithBatchSize(rows int64) EngineOption    { return core.WithBatchSize(rows) }
+func WithNativeBackend(enabled bool) EngineOption {
+	return core.WithNativeBackend(enabled)
+}
 func RegisterObjectStore(scheme string, store ObjectStore) error {
 	return core.RegisterObjectStore(scheme, store)
 }

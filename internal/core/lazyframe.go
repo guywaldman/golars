@@ -29,19 +29,22 @@ const (
 )
 
 type planNode struct {
-	kind      planKind
-	input     *planNode
-	right     *planNode
-	table     arrow.Table
-	source    sourceFactory
-	exprs     []Expr
-	keys      []Expr
-	leftKeys  []Expr
-	rightKeys []Expr
-	joinType  JoinType
-	suffix    string
-	columns   []string
-	limit     int64
+	kind         planKind
+	input        *planNode
+	right        *planNode
+	table        arrow.Table
+	source       sourceFactory
+	sourcePath   string
+	sourceFormat formatKind
+	sourceConfig scanConfig
+	exprs        []Expr
+	keys         []Expr
+	leftKeys     []Expr
+	rightKeys    []Expr
+	joinType     JoinType
+	suffix       string
+	columns      []string
+	limit        int64
 }
 
 type sourceFactory func(context.Context, *Engine) (recordSource, error)
@@ -207,6 +210,12 @@ func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
 	}
 	defer recoverMemoryLimit(&err)
 	optimizedPlan := optimizePlan(lf.plan)
+	if native, handled, nativeErr := tryNativeCollect(ctx, lf.engine, optimizedPlan); handled {
+		if nativeErr != nil {
+			return nil, nativeErr
+		}
+		return native, nil
+	}
 	if containsJoin(optimizedPlan) || containsWindow(optimizedPlan) || containsMaterializing(optimizedPlan) {
 		return collectBlockingPlan(ctx, lf.engine, optimizedPlan)
 	}

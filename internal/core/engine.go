@@ -19,6 +19,7 @@ type engineConfig struct {
 	memoryLimit int64
 	parallelism int
 	batchSize   int64
+	native      bool
 	stores      map[string]internalstorage.ObjectStore
 }
 
@@ -66,6 +67,15 @@ func WithBatchSize(rows int64) EngineOption {
 	}
 }
 
+// WithNativeBackend controls use of the bundled native execution backend for
+// plans it supports. Unsupported platforms and plans always use the Go path.
+func WithNativeBackend(enabled bool) EngineOption {
+	return func(c *engineConfig) error {
+		c.native = enabled
+		return nil
+	}
+}
+
 type allocationLimitPanic struct{ err *MemoryLimitError }
 
 type quotaAllocator struct {
@@ -108,13 +118,14 @@ type Engine struct {
 	allocator   *quotaAllocator
 	parallelism int
 	batchSize   int64
+	native      bool
 	stores      map[string]internalstorage.ObjectStore
 	storeMu     sync.RWMutex
 	closed      atomic.Bool
 }
 
 func NewEngine(options ...EngineOption) (*Engine, error) {
-	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, stores: make(map[string]internalstorage.ObjectStore)}
+	config := engineConfig{memoryLimit: DefaultMemoryLimit, parallelism: runtime.GOMAXPROCS(0), batchSize: 64 * 1024, native: true, stores: make(map[string]internalstorage.ObjectStore)}
 	for _, option := range options {
 		if err := option(&config); err != nil {
 			return nil, err
@@ -124,6 +135,7 @@ func NewEngine(options ...EngineOption) (*Engine, error) {
 		allocator:   &quotaAllocator{base: memory.NewGoAllocator(), limit: config.memoryLimit},
 		parallelism: config.parallelism,
 		batchSize:   config.batchSize,
+		native:      config.native,
 		stores:      config.stores,
 	}, nil
 }
@@ -132,7 +144,10 @@ func (e *Engine) MemoryLimit() int64 { return e.allocator.limit }
 func (e *Engine) MemoryUsed() int64  { return e.allocator.used.Load() }
 func (e *Engine) Parallelism() int   { return e.parallelism }
 func (e *Engine) BatchSize() int64   { return e.batchSize }
-func (e *Engine) Close()             { e.closed.Store(true) }
+func (e *Engine) NativeBackendEnabled() bool {
+	return e != nil && e.native
+}
+func (e *Engine) Close() { e.closed.Store(true) }
 
 func (e *Engine) ObjectStore(scheme string) (ObjectStore, bool) {
 	if e == nil {

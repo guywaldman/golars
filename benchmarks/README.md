@@ -39,6 +39,13 @@ go run ./cmd/golars-benchmark \
   -query filter_select \
   -iterations 5
 
+# Portable Go execution for comparison
+go run ./cmd/golars-benchmark \
+  -dataset /tmp/golars-benchmark.parquet \
+  -query filter_select \
+  -native-backend=false \
+  -iterations 5
+
 cargo run --release \
   --manifest-path benchmarks/polars/Cargo.toml \
   -- --dataset /tmp/golars-benchmark.parquet \

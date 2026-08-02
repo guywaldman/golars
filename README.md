@@ -48,6 +48,16 @@ one branch does not invalidate another.
 - Engine-wide memory accounting with a 1 GiB default quota and contextual
   cancellation through `context.Context`.
 
+## Native execution
+
+On supported targets, eligible local Parquet plans run through the bundled
+Rust/Polars backend. The library is embedded in the Go module and loaded with
+CGO-free FFI; consumers only need the normal `go get` and Go build workflow.
+No Rust toolchain, C compiler, shared-library installation, environment
+variables, or companion executable is required. Unsupported targets and plans
+use the portable Go executor automatically. Applications can force the Go
+executor with `WithNativeBackend(false)`.
+
 ## Query planning and storage
 
 - Lazy scans derive the columns required by a terminal projection and its

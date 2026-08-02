@@ -1,0 +1,13 @@
+[package]
+name = "golars-native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polars = { version = "0.52.0", default-features = false, features = ["ipc", "lazy", "parquet", "strings", "regex", "temporal", "timezones"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
