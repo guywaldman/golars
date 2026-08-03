@@ -317,6 +317,26 @@ func NewDataFrame(columns ...*Series) (*DataFrame, error) {
 	return core.NewDataFrame(columns...)
 }
 
+// DataFrameFromMaps creates an eager frame from row-oriented maps.
+func DataFrameFromMaps(rows []map[string]any) (*DataFrame, error) {
+	return core.DataFrameFromMaps(rows)
+}
+
+// NewDataFrameFromMaps is an alias for DataFrameFromMaps.
+func NewDataFrameFromMaps(rows []map[string]any) (*DataFrame, error) {
+	return core.NewDataFrameFromMaps(rows)
+}
+
+// DataFrameFromStructs creates an eager frame from exported struct fields.
+func DataFrameFromStructs[T any](rows []T) (*DataFrame, error) {
+	return core.DataFrameFromStructs(rows)
+}
+
+// NewDataFrameFromStructs is an alias for DataFrameFromStructs.
+func NewDataFrameFromStructs[T any](rows []T) (*DataFrame, error) {
+	return core.NewDataFrameFromStructs(rows)
+}
+
 // DataFrameFromArrow wraps an Arrow table as a DataFrame.
 func DataFrameFromArrow(table arrow.Table) (*DataFrame, error) {
 	return core.DataFrameFromArrow(table)

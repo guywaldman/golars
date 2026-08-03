@@ -43,6 +43,8 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 ## Featureset
 
 - [X] Arrow-backed `DataFrame` and `Series`, with retained Arrow interop.
+- [X] Row-oriented constructors: `DataFrameFromMaps` and generic
+  `DataFrameFromStructs`, with nullable missing fields and standard `json` tags.
 - [X] Eager and lazy `Select`/`SelectSeq`, `Filter`, `WithColumns`/`WithColumnsSeq`,
   `Limit`/`Head`/`Tail`, `Slice`, `Reverse`, `Clear`, `Sort`,
   `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,

@@ -14,11 +14,11 @@ func parquetConfig(engine *Engine, config scanConfig) parquetio.Config {
 		BatchSize:     config.batchSize,
 		Parallel:      engine.parallelism > 1,
 		Parallelism:   engine.parallelism,
-		MissingColumn: parquetMissingColumn,
+		MissingColumn: missingColumn,
 	}
 }
 
-func parquetMissingColumn(name string, available []string) error {
+func missingColumn(name string, available []string) error {
 	return &ColumnNotFoundError{Name: name, Available: available}
 }
 
