@@ -490,6 +490,9 @@ func newSeriesWithAllocator(mem memory.Allocator, name string, values any) (_ *S
 	if !v.IsValid() || v.Kind() != reflect.Slice {
 		return nil, fmt.Errorf("golars: NewSeries expects a slice, got %T", values)
 	}
+	if series, handled, err := newFastSeries(mem, name, values); handled || err != nil {
+		return series, err
+	}
 	dt, err := typeForGo(v.Type().Elem())
 	if err != nil {
 		return nil, err

@@ -142,6 +142,9 @@ func tableFromObjects(values []map[string]any, mem memory.Allocator, projectedCo
 				builders[i].AppendNull()
 				continue
 			}
+			if appendObjectValue(builders[i], value) {
+				continue
+			}
 			sc, err := toScalar(value, fields[i].Type, mem)
 			if err != nil {
 				return nil, err
@@ -163,6 +166,89 @@ func tableFromObjects(values []map[string]any, mem memory.Allocator, projectedCo
 	}
 	defer arrowutil.ReleaseArrays(columns)
 	return array.NewTableFromSlice(arrow.NewSchema(fields, nil), arrowutil.ArraysAsSlices(columns)), nil
+}
+
+// appendObjectValue handles the common scalar shapes directly. The fallback
+// remains responsible for nested values, named types, and JSON number values.
+func appendObjectValue(builder array.Builder, value any) bool {
+	switch builder := builder.(type) {
+	case *array.BooleanBuilder:
+		if value, ok := value.(bool); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Int8Builder:
+		if value, ok := value.(int8); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Int16Builder:
+		if value, ok := value.(int16); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Int32Builder:
+		if value, ok := value.(int32); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Int64Builder:
+		if value, ok := value.(int64); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Uint8Builder:
+		if value, ok := value.(uint8); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Uint16Builder:
+		if value, ok := value.(uint16); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Uint32Builder:
+		if value, ok := value.(uint32); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Uint64Builder:
+		if value, ok := value.(uint64); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Float32Builder:
+		if value, ok := value.(float32); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.Float64Builder:
+		if value, ok := value.(float64); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.StringBuilder:
+		if value, ok := value.(string); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.BinaryBuilder:
+		if value, ok := value.([]byte); ok {
+			builder.Append(value)
+			return true
+		}
+	case *array.TimestampBuilder:
+		if value, ok := value.(time.Time); ok {
+			builder.Append(arrow.Timestamp(value.UnixNano()))
+			return true
+		}
+	case *array.DurationBuilder:
+		if value, ok := value.(time.Duration); ok {
+			builder.Append(arrow.Duration(value))
+			return true
+		}
+	}
+	return false
 }
 
 func inferType(values []map[string]any, name string) arrow.DataType {
@@ -415,6 +501,16 @@ func normalizeScalarValue(value any, dt arrow.DataType) any {
 }
 
 func indirectValue(value any) any {
+	switch value.(type) {
+	case nil, bool, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, string, []byte, json.Number,
+		[]any, []bool, []int, []int8, []int16, []int32, []int64,
+		[]uint, []uint16, []uint32, []uint64,
+		[]float32, []float64, []string, map[string]any,
+		time.Time, time.Duration:
+		return value
+	}
 	reflected := reflect.ValueOf(value)
 	for reflected.IsValid() && (reflected.Kind() == reflect.Pointer || reflected.Kind() == reflect.Interface) {
 		if reflected.IsNil() {
