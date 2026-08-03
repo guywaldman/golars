@@ -23,7 +23,7 @@ summary, _ := df.GroupBy(gl.Col("country")).Agg(
 _ = summary.WriteCSV(ctx, "out.csv")
 ```
 
-Note that you can read from local files as well as cloud storage (S3 with `s3://` or Google Cloud Storage with `gs://`) using their default credential discovery, as Polars one.
+Note that you can read from local files as well as cloud storage (S3 with `s3://` or Google Cloud Storage with `gs://`) using their default credential discovery, as Polars does.
 If you need to configure it (such as for auth), you can use:
 
 ```go
@@ -68,6 +68,7 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
   or `WithObjectStore`.
 - [X] Engine-wide memory accounting with a 1 GiB default quota and contextual
   cancellation through `context.Context`.
+- [ ] Struct-level operations (`gl.Col("foo").Struct().Field("bar")`)
 
 ## Native execution
 
