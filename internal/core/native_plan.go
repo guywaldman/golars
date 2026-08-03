@@ -36,6 +36,7 @@ type nativeOperation struct {
 	Suffix    string       `json:"suffix,omitempty"`
 	Right     *nativeQuery `json:"right,omitempty"`
 	Limit     uint64       `json:"limit,omitempty"`
+	Offset    int64        `json:"offset,omitempty"`
 }
 
 type nativeExpr struct {
@@ -122,8 +123,22 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 				return nativeQuery{}, false, exprErr
 			}
 			operation.Exprs = exprs
+		case planSelectSeq:
+			operation.Kind = "select_seq"
+			exprs, exprOK, exprErr := marshalNativeExprs(root.exprs)
+			if exprErr != nil || !exprOK {
+				return nativeQuery{}, false, exprErr
+			}
+			operation.Exprs = exprs
 		case planWithColumns:
 			operation.Kind = "with_columns"
+			exprs, exprOK, exprErr := marshalNativeExprs(root.exprs)
+			if exprErr != nil || !exprOK {
+				return nativeQuery{}, false, exprErr
+			}
+			operation.Exprs = exprs
+		case planWithColumnsSeq:
+			operation.Kind = "with_columns_seq"
 			exprs, exprOK, exprErr := marshalNativeExprs(root.exprs)
 			if exprErr != nil || !exprOK {
 				return nativeQuery{}, false, exprErr
@@ -132,9 +147,18 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 		case planLimit:
 			operation.Kind = "limit"
 			operation.Limit = uint64(root.limit)
+		case planSlice:
+			operation.Kind = "slice"
+			operation.Offset = root.offset
+			operation.Limit = uint64(root.limit)
 		case planTail:
 			operation.Kind = "tail"
 			operation.Limit = uint64(root.limit)
+		case planReverse:
+			operation.Kind = "reverse"
+		case planDropNans:
+			operation.Kind = "drop_nans"
+			operation.Columns = append([]string(nil), root.columns...)
 		case planSort:
 			operation.Kind = "sort"
 			exprs, exprOK, exprErr := marshalNativeExprs(root.exprs)

@@ -740,6 +740,70 @@ func (s *Series) NullCount() int64 {
 	return int64(s.data.NullN())
 }
 
+// IsEmpty reports whether the series has no values.
+func (s *Series) IsEmpty() bool { return s.Len() == 0 }
+
+// NChunks returns the number of Arrow chunks backing the series.
+func (s *Series) NChunks() int {
+	if s == nil || s.data == nil {
+		return 0
+	}
+	return len(s.data.Chunks())
+}
+
+// Values returns detached Go values in row order. Nested values are copied so
+// the returned slice remains valid after the series is closed.
+func (s *Series) Values() ([]any, error) {
+	if s == nil || s.data == nil || s.closed {
+		return nil, ErrClosed
+	}
+	values := make([]any, 0, s.data.Len())
+	for _, chunk := range s.data.Chunks() {
+		for i := 0; i < chunk.Len(); i++ {
+			values = append(values, detachRowValue(chunk.GetOneForMarshal(i)))
+		}
+	}
+	return values, nil
+}
+
+// ToSlice is an alias for Values.
+func (s *Series) ToSlice() ([]any, error) { return s.Values() }
+
+// Slice returns a zero-copy row slice. Negative offsets count from the end.
+func (s *Series) Slice(offset, length int64) (*Series, error) {
+	if s == nil || s.data == nil || s.closed {
+		return nil, ErrClosed
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("%w: series slice length cannot be negative", ErrInvalidPlan)
+	}
+	start := offset
+	if start < 0 {
+		start = int64(s.data.Len()) + start
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > int64(s.data.Len()) {
+		start = int64(s.data.Len())
+	}
+	end := start + length
+	if end < start || end > int64(s.data.Len()) {
+		end = int64(s.data.Len())
+	}
+	data := array.NewChunkedSlice(s.data, start, end)
+	return newSeriesWithData(s.name, data), nil
+}
+
+// Clone returns an independent series retaining the same Arrow data.
+func (s *Series) Clone() (*Series, error) {
+	if s == nil || s.data == nil || s.closed {
+		return nil, ErrClosed
+	}
+	s.data.Retain()
+	return newSeriesWithData(s.name, s.data), nil
+}
+
 // ArrowChunked returns a retained Arrow chunked array.
 func (s *Series) ArrowChunked() *arrow.Chunked {
 	if s == nil || s.data == nil {

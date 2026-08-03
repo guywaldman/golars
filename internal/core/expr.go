@@ -72,6 +72,15 @@ func (e Expr) unary(name string) Expr {
 	return Expr{&exprNode{kind: exprCall, name: name, args: []*exprNode{e.node}}}
 }
 
+func (e Expr) call(name string, args ...Expr) Expr {
+	nodes := make([]*exprNode, len(args)+1)
+	nodes[0] = e.node
+	for i, arg := range args {
+		nodes[i+1] = arg.node
+	}
+	return Expr{&exprNode{kind: exprCall, name: name, args: nodes}}
+}
+
 // Eq compares two expressions for equality.
 func (e Expr) Eq(rhs Expr) Expr { return e.binary("equal", rhs) }
 
@@ -105,6 +114,53 @@ func (e Expr) Div(rhs Expr) Expr { return e.binary("divide", rhs) }
 // Mod computes the remainder of e divided by rhs.
 func (e Expr) Mod(rhs Expr) Expr { return e.binary("modulo", rhs) }
 
+// FloorDiv divides e by rhs and rounds the result toward negative infinity.
+func (e Expr) FloorDiv(rhs Expr) Expr { return e.binary("floor_divide", rhs) }
+
+// Pow raises e to the power rhs.
+func (e Expr) Pow(rhs Expr) Expr { return e.binary("power", rhs) }
+
+// Neg negates numeric values.
+func (e Expr) Neg() Expr { return e.unary("negate") }
+
+// Abs returns absolute values.
+func (e Expr) Abs() Expr { return e.unary("abs") }
+
+// Sqrt returns square roots.
+func (e Expr) Sqrt() Expr { return e.unary("sqrt") }
+
+// Exp returns e raised to the natural exponential.
+func (e Expr) Exp() Expr { return e.unary("exp") }
+
+// Log returns natural logarithms.
+func (e Expr) Log() Expr { return e.unary("log") }
+
+// Log10 returns base-10 logarithms.
+func (e Expr) Log10() Expr { return e.unary("log10") }
+
+// Sin returns sine values.
+func (e Expr) Sin() Expr { return e.unary("sin") }
+
+// Cos returns cosine values.
+func (e Expr) Cos() Expr { return e.unary("cos") }
+
+// Tan returns tangent values.
+func (e Expr) Tan() Expr { return e.unary("tan") }
+
+// Floor rounds values down to the nearest integer.
+func (e Expr) Floor() Expr { return e.unary("floor") }
+
+// Ceil rounds values up to the nearest integer.
+func (e Expr) Ceil() Expr { return e.unary("ceil") }
+
+// Round rounds numeric values to decimals places.
+func (e Expr) Round(decimals int) Expr {
+	return e.call("round", Lit(int64(decimals)))
+}
+
+// Clip limits values to the inclusive range [min, max].
+func (e Expr) Clip(min, max Expr) Expr { return e.call("clip", min, max) }
+
 // And combines boolean expressions with Kleene logic.
 func (e Expr) And(rhs Expr) Expr { return e.binary("and_kleene", rhs) }
 
@@ -122,6 +178,15 @@ func (e Expr) IsNotNull() Expr { return e.unary("is_valid") }
 
 // FillNull replaces null values with value.
 func (e Expr) FillNull(value Expr) Expr { return e.binary("coalesce", value) }
+
+// FillNaN replaces NaN values with value.
+func (e Expr) FillNaN(value Expr) Expr { return e.binary("fill_nan", value) }
+
+// DropNulls removes null values from an expression result.
+func (e Expr) DropNulls() Expr { return e.unary("drop_nulls") }
+
+// DropNaNs removes NaN values from an expression result.
+func (e Expr) DropNaNs() Expr { return e.unary("drop_nans") }
 
 // Alias assigns an output name to an expression.
 func (e Expr) Alias(name string) Expr {
@@ -195,6 +260,51 @@ func (e Expr) First() Expr { return e.aggregate("first") }
 // Last returns the last value in an aggregation.
 func (e Expr) Last() Expr { return e.aggregate("last") }
 
+// Median computes the median aggregation.
+func (e Expr) Median() Expr { return e.aggregate("median") }
+
+// Product computes the product aggregation.
+func (e Expr) Product() Expr { return e.aggregate("product") }
+
+// NUnique counts distinct values in an aggregation.
+func (e Expr) NUnique() Expr { return e.aggregate("n_unique") }
+
+// Len returns the number of values in an aggregation.
+func (e Expr) Len() Expr { return e.aggregate("len") }
+
+// Any reports whether any value in an aggregation is true.
+func (e Expr) Any() Expr { return e.aggregate("any") }
+
+// All reports whether all values in an aggregation are true.
+func (e Expr) All() Expr { return e.aggregate("all") }
+
+// ArgMax returns the index of the maximum value in an aggregation.
+func (e Expr) ArgMax() Expr { return e.aggregate("arg_max") }
+
+// ArgMin returns the index of the minimum value in an aggregation.
+func (e Expr) ArgMin() Expr { return e.aggregate("arg_min") }
+
+// Implode collects an aggregation into a list.
+func (e Expr) Implode() Expr { return e.aggregate("implode") }
+
+// Shift shifts values by periods, inserting nulls.
+func (e Expr) Shift(periods Expr) Expr { return e.binary("shift", periods) }
+
+// ShiftAndFill shifts values and fills the introduced nulls.
+func (e Expr) ShiftAndFill(periods, fill Expr) Expr { return e.call("shift_and_fill", periods, fill) }
+
+// Slice selects a contiguous range from each expression result.
+func (e Expr) Slice(offset, length Expr) Expr { return e.call("slice", offset, length) }
+
+// Reverse reverses each expression result.
+func (e Expr) Reverse() Expr { return e.unary("reverse") }
+
+// Unique keeps distinct values in an expression result.
+func (e Expr) Unique() Expr { return e.unary("unique") }
+
+// Explode expands list or string values into rows.
+func (e Expr) Explode() Expr { return e.unary("explode") }
+
 // StrExpr provides string kernels while keeping the main Expr namespace small.
 type StrExpr struct{ expr Expr }
 
@@ -233,6 +343,12 @@ func (e Expr) Struct() StructExpr { return StructExpr{expr: e} }
 func (s StructExpr) Element(name string) Expr {
 	return Expr{node: &exprNode{kind: exprCall, name: "struct_field", field: name, args: []*exprNode{s.expr.node}}}
 }
+
+// Unnest expands struct fields into separate columns.
+func (s StructExpr) Unnest() Expr { return s.expr.unary("struct_unnest") }
+
+// JSONEncode serializes struct values as JSON strings.
+func (s StructExpr) JSONEncode() Expr { return s.expr.unary("struct_json_encode") }
 
 // DtExpr provides calendar extraction from Arrow date/timestamp columns.
 type DtExpr struct{ expr Expr }

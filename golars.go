@@ -121,6 +121,8 @@ type (
 	Expr = core.Expr
 	// StrExpr provides string expressions.
 	StrExpr = core.StrExpr
+	// ListExpr provides operations on list-valued expressions.
+	ListExpr = core.ListExpr
 	// StructExpr provides access to fields in struct-valued expressions.
 	StructExpr = core.StructExpr
 	// DtExpr provides date and timestamp expressions.

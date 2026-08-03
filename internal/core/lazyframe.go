@@ -17,8 +17,10 @@ const (
 	planTable planKind = iota
 	planSource
 	planSelect
+	planSelectSeq
 	planFilter
 	planWithColumns
+	planWithColumnsSeq
 	planLimit
 	planTail
 	planSort
@@ -27,6 +29,9 @@ const (
 	planUnique
 	planExplode
 	planUnnest
+	planSlice
+	planReverse
+	planDropNans
 )
 
 type planNode struct {
@@ -46,6 +51,7 @@ type planNode struct {
 	suffix       string
 	columns      []string
 	limit        int64
+	offset       int64
 }
 
 type sourceFactory func(context.Context, *Engine) (recordSource, error)
@@ -112,6 +118,14 @@ func (lf *LazyFrame) Select(exprs ...Expr) *LazyFrame {
 	return lf.append(planSelect, append([]Expr(nil), exprs...), 0)
 }
 
+// SelectSeq adds a sequential projection to the lazy plan.
+func (lf *LazyFrame) SelectSeq(exprs ...Expr) *LazyFrame {
+	if len(exprs) == 0 {
+		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: SelectSeq needs at least one expression", ErrInvalidPlan))
+	}
+	return lf.append(planSelectSeq, append([]Expr(nil), exprs...), 0)
+}
+
 // Filter adds a row predicate to the lazy plan.
 func (lf *LazyFrame) Filter(predicate Expr) *LazyFrame {
 	if !predicate.IsValid() {
@@ -126,6 +140,14 @@ func (lf *LazyFrame) WithColumns(exprs ...Expr) *LazyFrame {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: WithColumns needs at least one expression", ErrInvalidPlan))
 	}
 	return lf.append(planWithColumns, append([]Expr(nil), exprs...), 0)
+}
+
+// WithColumnsSeq adds or replaces columns sequentially in the lazy plan.
+func (lf *LazyFrame) WithColumnsSeq(exprs ...Expr) *LazyFrame {
+	if len(exprs) == 0 {
+		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: WithColumnsSeq needs at least one expression", ErrInvalidPlan))
+	}
+	return lf.append(planWithColumnsSeq, append([]Expr(nil), exprs...), 0)
 }
 
 // Unique keeps one row for each distinct key.
@@ -153,7 +175,7 @@ func (lf *LazyFrame) appendColumns(kind planKind, columns []string) *LazyFrame {
 	if lf.err != nil {
 		return lf
 	}
-	if kind != planUnique && len(columns) == 0 {
+	if kind != planUnique && kind != planDropNans && len(columns) == 0 {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: operation requires at least one column", ErrInvalidPlan))
 	}
 	return newLazyFrame(lf.engine, &planNode{kind: kind, input: lf.plan, columns: append([]string(nil), columns...)}, nil)
@@ -165,6 +187,29 @@ func (lf *LazyFrame) Limit(n int64) *LazyFrame {
 		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: limit must be non-negative", ErrInvalidPlan))
 	}
 	return lf.append(planLimit, nil, n)
+}
+
+// Slice adds a row slice to the lazy plan. Negative offsets count from the end.
+func (lf *LazyFrame) Slice(offset, length int64) *LazyFrame {
+	if lf == nil || lf.closed.Load() {
+		return &LazyFrame{err: ErrClosed}
+	}
+	if length < 0 {
+		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: slice length must be non-negative", ErrInvalidPlan))
+	}
+	return newLazyFrame(lf.engine, &planNode{kind: planSlice, input: lf.plan, offset: offset, limit: length}, nil)
+}
+
+// Reverse reverses the row order of the lazy frame.
+func (lf *LazyFrame) Reverse() *LazyFrame { return lf.append(planReverse, nil, 0) }
+
+// Clear produces an empty lazy frame with the current schema.
+func (lf *LazyFrame) Clear() *LazyFrame { return lf.Limit(0) }
+
+// DropNaNs removes rows containing NaN values. If columns are provided, only
+// those columns are checked.
+func (lf *LazyFrame) DropNaNs(columns ...string) *LazyFrame {
+	return lf.appendColumns(planDropNans, columns)
 }
 
 // Head adds a limit for the first n rows.
@@ -210,6 +255,36 @@ func (g *LazyGroupBy) Agg(exprs ...Expr) *LazyFrame {
 	}
 	return newLazyFrame(g.lf.engine, &planNode{kind: planGroupBy, input: g.lf.plan, keys: g.keys, exprs: exprs}, nil)
 }
+
+// Len returns one row count per group.
+func (g *LazyGroupBy) Len() *LazyFrame { return g.Agg(Count()) }
+
+// Count counts non-null values for every non-key column per group.
+func (g *LazyGroupBy) Count() *LazyFrame { return g.Agg(All().Count()) }
+
+// Sum sums every non-key column per group.
+func (g *LazyGroupBy) Sum() *LazyFrame { return g.Agg(All().Sum()) }
+
+// Mean computes the mean of every non-key column per group.
+func (g *LazyGroupBy) Mean() *LazyFrame { return g.Agg(All().Mean()) }
+
+// Min computes the minimum of every non-key column per group.
+func (g *LazyGroupBy) Min() *LazyFrame { return g.Agg(All().Min()) }
+
+// Max computes the maximum of every non-key column per group.
+func (g *LazyGroupBy) Max() *LazyFrame { return g.Agg(All().Max()) }
+
+// Median computes the median of every non-key column per group.
+func (g *LazyGroupBy) Median() *LazyFrame { return g.Agg(All().Median()) }
+
+// NUnique counts distinct values of every non-key column per group.
+func (g *LazyGroupBy) NUnique() *LazyFrame { return g.Agg(All().NUnique()) }
+
+// First returns the first value of every non-key column per group.
+func (g *LazyGroupBy) First() *LazyFrame { return g.Agg(All().First()) }
+
+// Last returns the last value of every non-key column per group.
+func (g *LazyGroupBy) Last() *LazyFrame { return g.Agg(All().Last()) }
 
 // Collect executes the lazy plan and returns an eager DataFrame.
 func (lf *LazyFrame) Collect(ctx context.Context) (_ *DataFrame, err error) {
@@ -393,14 +468,24 @@ func (lf *LazyFrame) explainPlan() string {
 			nodes = append(nodes, "SCAN")
 		case planSelect:
 			nodes = append(nodes, "SELECT "+formatExprList(node.exprs))
+		case planSelectSeq:
+			nodes = append(nodes, "SELECT_SEQ "+formatExprList(node.exprs))
 		case planFilter:
 			nodes = append(nodes, "FILTER "+node.exprs[0].String())
 		case planWithColumns:
 			nodes = append(nodes, "WITH_COLUMNS "+formatExprList(node.exprs))
+		case planWithColumnsSeq:
+			nodes = append(nodes, "WITH_COLUMNS_SEQ "+formatExprList(node.exprs))
 		case planLimit:
 			nodes = append(nodes, fmt.Sprintf("LIMIT %d", node.limit))
+		case planSlice:
+			nodes = append(nodes, fmt.Sprintf("SLICE %d:%d", node.offset, node.limit))
 		case planTail:
 			nodes = append(nodes, fmt.Sprintf("TAIL %d", node.limit))
+		case planReverse:
+			nodes = append(nodes, "REVERSE")
+		case planDropNans:
+			nodes = append(nodes, "DROP_NANS "+formatStringList(node.columns))
 		case planSort:
 			nodes = append(nodes, "SORT "+formatExprList(node.exprs))
 		case planGroupBy:

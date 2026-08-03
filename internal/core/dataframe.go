@@ -229,6 +229,12 @@ func (df *DataFrame) Width() int {
 // Shape returns row and column counts.
 func (df *DataFrame) Shape() (int64, int) { return df.Height(), df.Width() }
 
+// Columns returns the frame's column names in order.
+func (df *DataFrame) Columns() []string { return df.Schema().Names() }
+
+// IsEmpty reports whether the frame has no rows.
+func (df *DataFrame) IsEmpty() bool { return df.Height() == 0 }
+
 // ArrowTable returns a retained Arrow table. The caller must Release it.
 func (df *DataFrame) ArrowTable() (arrow.Table, error) {
 	if err := df.ensureOpen(); err != nil {
@@ -266,6 +272,13 @@ func (df *DataFrame) Select(exprs ...Expr) (*DataFrame, error) {
 	return plan.Collect(context.Background())
 }
 
+// SelectSeq evaluates a projection sequentially and returns a new frame.
+func (df *DataFrame) SelectSeq(exprs ...Expr) (*DataFrame, error) {
+	plan := df.Lazy().SelectSeq(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
 // Filter keeps rows matching predicate.
 func (df *DataFrame) Filter(predicate Expr) (*DataFrame, error) {
 	plan := df.Lazy().Filter(predicate)
@@ -280,9 +293,30 @@ func (df *DataFrame) WithColumns(exprs ...Expr) (*DataFrame, error) {
 	return plan.Collect(context.Background())
 }
 
+// WithColumnsSeq evaluates column expressions sequentially.
+func (df *DataFrame) WithColumnsSeq(exprs ...Expr) (*DataFrame, error) {
+	plan := df.Lazy().WithColumnsSeq(exprs...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
 // Limit returns at most n rows from the start of the frame.
 func (df *DataFrame) Limit(n int64) (*DataFrame, error) {
 	plan := df.Lazy().Limit(n)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
+// Slice returns a row slice. Negative offsets count from the end.
+func (df *DataFrame) Slice(offset, length int64) (*DataFrame, error) {
+	plan := df.Lazy().Slice(offset, length)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
+// Reverse reverses the row order.
+func (df *DataFrame) Reverse() (*DataFrame, error) {
+	plan := df.Lazy().Reverse()
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
@@ -357,6 +391,26 @@ func (df *DataFrame) DropNulls(names ...string) (*DataFrame, error) {
 	}
 	return df.Filter(predicate)
 }
+
+// DropNaNs removes rows containing NaN values.
+func (df *DataFrame) DropNaNs(names ...string) (*DataFrame, error) {
+	plan := df.Lazy().DropNaNs(names...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
+// Clone returns an independent frame retaining the same Arrow data.
+func (df *DataFrame) Clone() (*DataFrame, error) {
+	table, err := df.ArrowTable()
+	if err != nil {
+		return nil, err
+	}
+	defer table.Release()
+	return DataFrameFromArrow(table)
+}
+
+// Clear returns an empty frame with the same schema.
+func (df *DataFrame) Clear() (*DataFrame, error) { return df.Limit(0) }
 
 // Unique keeps one row for each distinct key.
 func (df *DataFrame) Unique(columns ...string) (*DataFrame, error) {
@@ -455,6 +509,36 @@ func (g *GroupBy) Agg(exprs ...Expr) (*DataFrame, error) {
 	defer plan.Close()
 	return plan.Collect(context.Background())
 }
+
+// Len returns one row count per group.
+func (g *GroupBy) Len() (*DataFrame, error) { return g.Agg(Count()) }
+
+// Count counts non-null values for every non-key column per group.
+func (g *GroupBy) Count() (*DataFrame, error) { return g.Agg(All().Count()) }
+
+// Sum sums every non-key column per group.
+func (g *GroupBy) Sum() (*DataFrame, error) { return g.Agg(All().Sum()) }
+
+// Mean computes the mean of every non-key column per group.
+func (g *GroupBy) Mean() (*DataFrame, error) { return g.Agg(All().Mean()) }
+
+// Min computes the minimum of every non-key column per group.
+func (g *GroupBy) Min() (*DataFrame, error) { return g.Agg(All().Min()) }
+
+// Max computes the maximum of every non-key column per group.
+func (g *GroupBy) Max() (*DataFrame, error) { return g.Agg(All().Max()) }
+
+// Median computes the median of every non-key column per group.
+func (g *GroupBy) Median() (*DataFrame, error) { return g.Agg(All().Median()) }
+
+// NUnique counts distinct values of every non-key column per group.
+func (g *GroupBy) NUnique() (*DataFrame, error) { return g.Agg(All().NUnique()) }
+
+// First returns the first value of every non-key column per group.
+func (g *GroupBy) First() (*DataFrame, error) { return g.Agg(All().First()) }
+
+// Last returns the last value of every non-key column per group.
+func (g *GroupBy) Last() (*DataFrame, error) { return g.Agg(All().Last()) }
 
 // SortByColumns is a convenience for common column-name sorting.
 func (df *DataFrame) SortByColumns(names ...string) (*DataFrame, error) {

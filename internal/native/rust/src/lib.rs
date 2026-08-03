@@ -162,6 +162,8 @@ struct QueryOperation {
     right: Option<Box<QueryRequest>>,
     #[serde(default)]
     limit: u64,
+    #[serde(default)]
+    offset: i64,
 }
 
 #[derive(Deserialize)]
@@ -243,9 +245,18 @@ fn build_query(request: &QueryRequest) -> Result<LazyFrame, String> {
         frame = match operation.kind.as_str() {
             "filter" if operation.exprs.len() == 1 => frame.filter(to_expr(&operation.exprs[0])?),
             "select" => frame.select(to_exprs(&operation.exprs)?),
+            "select_seq" => frame.select_seq(to_exprs(&operation.exprs)?),
             "with_columns" => frame.with_columns(to_exprs(&operation.exprs)?),
+            "with_columns_seq" => frame.with_columns_seq(to_exprs(&operation.exprs)?),
             "limit" => frame.limit(operation.limit as IdxSize),
+            "slice" => frame.slice(operation.offset, operation.limit as IdxSize),
             "tail" => frame.tail(operation.limit as IdxSize),
+            "reverse" => frame.reverse(),
+            "drop_nans" => {
+                let subset =
+                    (!operation.columns.is_empty()).then(|| cols(operation.columns.clone()));
+                frame.drop_nans(subset)
+            }
             "sort" => {
                 let expressions = to_exprs(&operation.exprs)?;
                 let descending = operation.exprs.iter().map(|expr| expr.descending);
@@ -539,6 +550,43 @@ fn two_args(expression: &QueryExpr) -> Result<(Expr, Expr), String> {
     Ok((to_expr(&expression.args[0])?, to_expr(&expression.args[1])?))
 }
 
+fn three_args(expression: &QueryExpr) -> Result<(Expr, Expr, Expr), String> {
+    if expression.args.len() != 3 {
+        return Err(format!(
+            "native expression {:?} requires three arguments",
+            expression.name
+        ));
+    }
+    Ok((
+        to_expr(&expression.args[0])?,
+        to_expr(&expression.args[1])?,
+        to_expr(&expression.args[2])?,
+    ))
+}
+
+fn literal_i64(expression: &QueryExpr) -> Result<i64, String> {
+    let literal = expression
+        .literal
+        .as_ref()
+        .ok_or_else(|| "native expression argument must be an integer literal".to_owned())?;
+    literal
+        .value
+        .as_i64()
+        .ok_or_else(|| "native expression argument must be an integer literal".to_owned())
+}
+
+fn literal_string(expression: &QueryExpr) -> Result<String, String> {
+    let literal = expression
+        .literal
+        .as_ref()
+        .ok_or_else(|| "native expression argument must be a string literal".to_owned())?;
+    literal
+        .value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "native expression argument must be a string literal".to_owned())
+}
+
 fn to_aggregate(expression: &QueryExpr) -> Result<Expr, String> {
     match expression.name.as_str() {
         "count_rows" => Ok(len().cast(DataType::Int64)),
@@ -549,6 +597,15 @@ fn to_aggregate(expression: &QueryExpr) -> Result<Expr, String> {
         "count" => Ok(one_arg(expression)?.count().cast(DataType::Int64)),
         "first" => Ok(one_arg(expression)?.first()),
         "last" => Ok(one_arg(expression)?.last()),
+        "median" => Ok(one_arg(expression)?.median()),
+        "product" => Ok(one_arg(expression)?.product()),
+        "n_unique" => Ok(one_arg(expression)?.n_unique()),
+        "len" => Ok(one_arg(expression)?.len().cast(DataType::Int64)),
+        "any" => Ok(one_arg(expression)?.any(true)),
+        "all" => Ok(one_arg(expression)?.all(true)),
+        "arg_max" => Ok(one_arg(expression)?.arg_max()),
+        "arg_min" => Ok(one_arg(expression)?.arg_min()),
+        "implode" => Ok(one_arg(expression)?.implode()),
         name => Err(format!("unsupported native aggregate {name:?}")),
     }
 }
@@ -619,6 +676,39 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
             let (left, right) = two_args(expression)?;
             Ok(left % right)
         }
+        "floor_divide" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left.floor_div(right))
+        }
+        "power" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left.pow(right))
+        }
+        "negate" => Ok(-one_arg(expression)?),
+        "abs" => Ok(one_arg(expression)?.abs()),
+        "sqrt" => Ok(one_arg(expression)?.sqrt()),
+        "exp" => Ok(one_arg(expression)?.exp()),
+        "log" => Ok(one_arg(expression)?.log(lit(std::f64::consts::E))),
+        "log10" => Ok(one_arg(expression)?.log(lit(10.0_f64))),
+        "sin" => Ok(one_arg(expression)?.sin()),
+        "cos" => Ok(one_arg(expression)?.cos()),
+        "tan" => Ok(one_arg(expression)?.tan()),
+        "floor" => Ok(one_arg(expression)?.floor()),
+        "ceil" => Ok(one_arg(expression)?.ceil()),
+        "round" => {
+            if expression.args.len() != 2 {
+                return Err("native round requires an expression and decimal count".to_owned());
+            }
+            let decimals = literal_i64(&expression.args[1])?;
+            if decimals < 0 {
+                return Err("native round decimal count must be non-negative".to_owned());
+            }
+            Ok(to_expr(&expression.args[0])?.round(decimals as u32, RoundMode::HalfToEven))
+        }
+        "clip" => {
+            let (left, min, max) = three_args(expression)?;
+            Ok(left.clip(min, max))
+        }
         "and_kleene" => {
             let (left, right) = two_args(expression)?;
             Ok(left.and(right))
@@ -630,6 +720,27 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         "invert" => Ok(one_arg(expression)?.not()),
         "is_null" => Ok(one_arg(expression)?.is_null()),
         "is_valid" => Ok(one_arg(expression)?.is_not_null()),
+        "fill_nan" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left.fill_nan(right))
+        }
+        "drop_nulls" => Ok(one_arg(expression)?.drop_nulls()),
+        "drop_nans" => Ok(one_arg(expression)?.drop_nans()),
+        "shift" => {
+            let (left, right) = two_args(expression)?;
+            Ok(left.shift(right))
+        }
+        "shift_and_fill" => {
+            let (left, periods, fill) = three_args(expression)?;
+            Ok(left.shift_and_fill(periods, fill))
+        }
+        "slice" => {
+            let (left, offset, length) = three_args(expression)?;
+            Ok(left.slice(offset, length))
+        }
+        "reverse" => Ok(one_arg(expression)?.reverse()),
+        "unique" => Ok(one_arg(expression)?.unique()),
+        "explode" => Ok(one_arg(expression)?.explode()),
         "str_contains" => {
             let (left, right) = two_args(expression)?;
             Ok(left.str().contains(right, false))
@@ -645,6 +756,27 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         "str_lower" => Ok(one_arg(expression)?.str().to_lowercase()),
         "str_upper" => Ok(one_arg(expression)?.str().to_uppercase()),
         "str_length" => Ok(one_arg(expression)?.str().len_chars().cast(DataType::Int64)),
+        "str_length_bytes" => Ok(one_arg(expression)?.str().len_bytes().cast(DataType::Int64)),
+        "str_slice" => {
+            let (left, offset, length) = three_args(expression)?;
+            Ok(left.str().slice(offset, length))
+        }
+        "str_replace" => {
+            let (left, pattern, value) = three_args(expression)?;
+            Ok(left.str().replace(pattern, value, true))
+        }
+        "str_replace_all" => {
+            let (left, pattern, value) = three_args(expression)?;
+            Ok(left.str().replace_all(pattern, value, true))
+        }
+        "str_split" => {
+            let (left, delimiter) = two_args(expression)?;
+            Ok(left.str().split(delimiter))
+        }
+        "str_strip_chars" => {
+            let (left, characters) = two_args(expression)?;
+            Ok(left.str().strip_chars(characters))
+        }
         "coalesce" => {
             let (left, right) = two_args(expression)?;
             Ok(left.fill_null(right))
@@ -694,6 +826,46 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         "dt_year" => Ok(one_arg(expression)?.dt().year()),
         "dt_month" => Ok(one_arg(expression)?.dt().month()),
         "dt_day" => Ok(one_arg(expression)?.dt().day()),
+        "dt_hour" => Ok(one_arg(expression)?.dt().hour()),
+        "dt_minute" => Ok(one_arg(expression)?.dt().minute()),
+        "dt_second" => Ok(one_arg(expression)?.dt().second()),
+        "dt_week" => Ok(one_arg(expression)?.dt().week()),
+        "dt_weekday" => Ok(one_arg(expression)?.dt().weekday()),
+        "dt_quarter" => Ok(one_arg(expression)?.dt().quarter()),
+        "dt_date" => Ok(one_arg(expression)?.dt().date()),
+        "dt_time" => Ok(one_arg(expression)?.dt().time()),
+        "dt_to_string" => {
+            if expression.args.len() != 2 {
+                return Err("native temporal formatting requires a format string".to_owned());
+            }
+            let format = literal_string(&expression.args[1])?;
+            Ok(to_expr(&expression.args[0])?
+                .dt()
+                .to_string(format.as_str()))
+        }
+        "list_len" => Ok(one_arg(expression)?.list().len()),
+        "list_max" => Ok(one_arg(expression)?.list().max()),
+        "list_min" => Ok(one_arg(expression)?.list().min()),
+        "list_sum" => Ok(one_arg(expression)?.list().sum()),
+        "list_mean" => Ok(one_arg(expression)?.list().mean()),
+        "list_reverse" => Ok(one_arg(expression)?.list().reverse()),
+        "list_unique" => Ok(one_arg(expression)?.list().unique()),
+        "list_n_unique" => Ok(one_arg(expression)?.list().n_unique()),
+        "list_get" => {
+            let (left, index) = two_args(expression)?;
+            Ok(left.list().get(index, true))
+        }
+        "list_contains" => {
+            let (left, value) = two_args(expression)?;
+            Ok(left.list().contains(value, false))
+        }
+        "list_slice" => {
+            let (left, offset, length) = three_args(expression)?;
+            Ok(left.list().slice(offset, length))
+        }
+        "list_explode" => Ok(one_arg(expression)?.explode()),
+        "struct_unnest" => Ok(one_arg(expression)?.struct_().field_by_name("*")),
+        "struct_json_encode" => Ok(one_arg(expression)?.struct_().json_encode()),
         "is_nan" => Ok(one_arg(expression)?.is_nan()),
         "is_not_nan" => Ok(one_arg(expression)?.is_not_nan()),
         "is_finite" => Ok(one_arg(expression)?.is_finite()),

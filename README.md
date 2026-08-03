@@ -43,12 +43,14 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 ## Featureset
 
 - [X] Arrow-backed `DataFrame` and `Series`, with retained Arrow interop.
-- [X] Eager and lazy `Select`, `Filter`, `WithColumns`, `Limit`/`Head`/`Tail`, `Sort`,
+- [X] Eager and lazy `Select`/`SelectSeq`, `Filter`, `WithColumns`/`WithColumnsSeq`,
+  `Limit`/`Head`/`Tail`, `Slice`, `Reverse`, `Clear`, `Sort`,
   `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,
-  `Unnest`, `Drop`, `Rename`, and `DropNulls`.
-- [X] Expression trees with arithmetic (including modulo), comparisons, boolean logic, null handling,
-  casts, aggregates, conditional expressions, partitioned windows, descending
-  sort, membership/range predicates, and common string/date kernels.
+  `Unnest`, `Drop`, `Rename`, `DropNulls`, and `DropNaNs`.
+- [X] Expression trees with arithmetic (including modulo, powers, rounding, and
+  trigonometric kernels), comparisons, boolean logic, null/NaN handling, casts,
+  aggregates, conditional expressions, partitioned windows, descending sort,
+  membership/range predicates, list expressions, and common string/date kernels.
 - [X] Native JSON-column decoding into typed structs and lists, with SIMD parsing,
   row-level nulling for malformed JSON, field-level nulling for bad leaves,
   coercion controls, and strict required-field validation.
@@ -63,6 +65,9 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 - [X] Row-oriented helpers: `Rows` materializes detached row maps, while
   `ForEachRow` streams them without retaining the complete result. `ToDicts`
   remains as a Polars-compatible alias.
+- [X] Series value access with `Values`/`ToSlice`, zero-copy `Slice`, `Clone`,
+  `IsEmpty`, and Arrow chunk metadata; DataFrames expose `Columns`, `IsEmpty`,
+  `Clone`, and the corresponding row operations.
 - [X] Local globbing and Hive-style Parquet partition discovery.
 - [X] Hive dataset writes with `Create`/`Append`, partition columns,
   `_SUCCESS`, and `_golars_schema.json`.
@@ -96,18 +101,7 @@ The package can still be compiled on other Go targets, but collection returns
 an explicit native-backend availability error because no matching Polars
 library is embedded.
 
-## Query planning and storage
-
-Similar to Polars:
-
-- [X] Local Parquet/CSV/IPC scans remain lazy until collection; custom object
-  stores and JSON readers are adapted to Arrow IPC before execution.
-- [X] Polars owns logical optimization, expression simplification, projection
-  and predicate pushdown, limit pushdown, type coercion, and physical planning.
-  `ExplainUnoptimized` and `ExplainOptimized` describe the Go-facing plan; the
-  native optimizer is applied during collection.
-
-## Typed JSON columns
+## Fast JSON parsing
 
 `DecodeJSON` turns a string expression into a typed Arrow value. Define the
 target with the same descriptors used for DataFrame columns; nested structs and
@@ -164,27 +158,6 @@ The implementation is intentionally a fast-breaking v0 API. The execution
 kernel and format contracts are stable enough for experimentation, while the
 public type names and richer Polars parity surface will continue to grow.
 
-## Repository layout
-
-- `golars.go` is the small public compatibility facade. It aliases the public
-  types and forwards constructors/functions to the implementation package.
-- `internal/core` owns the tightly coupled public API implementation, logical
-  plan bridge, Arrow conversion, storage integration, and white-box tests.
-  Relational execution is delegated to the native Polars library.
-- `internal/arrowutil` contains shared Arrow ownership and scalar helpers;
-  `internal/jsonio` handles JSON inference and encoding; `internal/ipcio`
-  handles Arrow IPC file readers.
-- `internal/parquetio` owns Parquet readers, row-group pruning, projection,
-  and ranged object reads; `internal/storage` owns S3/GCS adapters; and
-  `internal/hive` owns Hive partition enrichment.
-- `internal/storageuri` contains object-URI validation. These packages are
-  implementation boundaries and are not part of the public API.
-- `benchmarks` contains the Go/Rust comparison harness and its runnable tools;
-  there is no benchmark-only code under `cmd/`.
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup, test
-commands, E2E requirements, and benchmark workflow.
-
 ## Performance and Benchmarks
 
 The [`benchmarks`](benchmarks) directory contains equivalent Go and Rust
@@ -239,3 +212,7 @@ GOLARS_BENCH_POLARS_ITERATIONS=3 \
 GOLARS_BENCH_WARMUP=1 \
 ./benchmarks/run.sh
 ```
+
+## Contributing
+
+Feel very welcome to do so! See [`CONTRIBUTING.md`](CONTRIBUTING.md).
