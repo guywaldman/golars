@@ -41,6 +41,7 @@ type nativeOperation struct {
 type nativeExpr struct {
 	Kind       string            `json:"kind"`
 	Name       string            `json:"name,omitempty"`
+	Field      string            `json:"field,omitempty"`
 	Literal    *nativeLiteral    `json:"literal,omitempty"`
 	Args       []nativeExpr      `json:"args,omitempty"`
 	WindowKeys []nativeExpr      `json:"window_keys,omitempty"`
@@ -290,7 +291,7 @@ func marshalNativeExpr(node *exprNode) (nativeExpr, bool, error) {
 	if node == nil {
 		return nativeExpr{}, false, nil
 	}
-	result := nativeExpr{Descending: node.descending}
+	result := nativeExpr{Descending: node.descending, Field: node.field}
 	if len(node.windowKeys) != 0 {
 		keys, ok, err := marshalNativeExprNodes(node.windowKeys)
 		if err != nil || !ok {

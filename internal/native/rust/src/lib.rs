@@ -170,6 +170,8 @@ struct QueryExpr {
     #[serde(default)]
     name: String,
     #[serde(default)]
+    field: String,
+    #[serde(default)]
     literal: Option<QueryLiteral>,
     #[serde(default)]
     args: Vec<QueryExpr>,
@@ -562,6 +564,16 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
                 .as_ref()
                 .ok_or_else(|| "native JSON decode options are missing".to_owned())?;
             json_decode_expr(one_arg(expression)?, options)
+        }
+        "struct_field" => {
+            if expression.args.len() != 1 || expression.field.is_empty() {
+                return Err(
+                    "native struct field access requires one argument and a field name".to_owned(),
+                );
+            }
+            Ok(one_arg(expression)?
+                .struct_()
+                .field_by_name(expression.field.as_str()))
         }
         "equal" => {
             let (left, right) = two_args(expression)?;

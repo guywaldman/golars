@@ -142,3 +142,53 @@ func TestDecodeJSONErrorModeRaisesForMalformedRows(t *testing.T) {
 		t.Fatalf("malformed JSON error=%v, want row-level decode error", err)
 	}
 }
+
+func TestStructElementSelectsNestedFields(t *testing.T) {
+	if _, err := nativebackend.Open(); err != nil {
+		t.Skipf("native backend unavailable: %v", err)
+	}
+	raw, err := NewSeries("raw", []string{
+		`{"id":1,"profile":{"name":"alpha"}}`,
+		`{"id":2,"profile":{"name":"beta"}}`,
+		`{"id":3,"profile":null}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	input, err := NewDataFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+
+	schema := StructOf(
+		Field{Name: "id", Type: Int64, Nullable: false},
+		Field{
+			Name:     "profile",
+			Type:     StructOf(Field{Name: "name", Type: String, Nullable: true}),
+			Nullable: true,
+		},
+	)
+	decoded := input.Lazy().Select(DecodeJSON(Col("raw"), schema).Alias("payload"))
+	result, err := decoded.Select(
+		Col("payload").Struct().Element("profile").Struct().Element("name").Alias("name"),
+	).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	rows, err := result.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rows[0]["name"]; got != "alpha" {
+		t.Fatalf("first nested field=%v, want alpha", got)
+	}
+	if got := rows[1]["name"]; got != "beta" {
+		t.Fatalf("second nested field=%v, want beta", got)
+	}
+	if got := rows[2]["name"]; got != nil {
+		t.Fatalf("null nested field=%v, want nil", got)
+	}
+}

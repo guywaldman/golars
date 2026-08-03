@@ -52,14 +52,17 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 - [X] Native JSON-column decoding into typed structs and lists, with SIMD parsing,
   row-level nulling for malformed JSON, field-level nulling for bad leaves,
   coercion controls, and strict required-field validation.
+- [X] Struct field expressions such as `Col("payload").Struct().Element("user_id")`,
+  including nested struct access.
 - [X] Arrow type descriptors - primitive, temporal, decimal, dictionary
   (categorical/enum), nested list/struct/map, fixed-size, view, interval, and
   run-end encoded types. `DataFrame`/`Series` constructors accept Arrow arrays,
   chunked arrays, tables, and record batches without a copy at the boundary.
 - [X] Lazy scans and eager reads for Parquet, CSV, NDJSON, JSON arrays, and Arrow IPC file/stream formats.
 - [X] Lazy and eager sinks for the same formats, with non-overwriting local-file defaults. `LazyFrame.Sink` selects the writer from the destination extension.
-- [X] Row-oriented helpers: `Rows`/`ToDicts` materialize detached row maps, while
-  `ForEachRow` streams them without retaining the complete result.
+- [X] Row-oriented helpers: `Rows` materializes detached row maps, while
+  `ForEachRow` streams them without retaining the complete result. `ToDicts`
+  remains as a Polars-compatible alias.
 - [X] Local globbing and Hive-style Parquet partition discovery.
 - [X] Hive dataset writes with `Create`/`Append`, partition columns,
   `_SUCCESS`, and `_golars_schema.json`.
@@ -68,7 +71,6 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
   or `WithObjectStore`.
 - [X] Engine-wide memory accounting with a 1 GiB default quota and contextual
   cancellation through `context.Context`.
-- [ ] Struct-level operations (`gl.Col("foo").Struct().Field("bar")`)
 
 ## Native execution
 

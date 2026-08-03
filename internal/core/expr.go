@@ -19,6 +19,7 @@ const (
 type exprNode struct {
 	kind       exprKind
 	name       string
+	field      string
 	value      any
 	args       []*exprNode
 	windowKeys []*exprNode
@@ -222,6 +223,17 @@ func (s StrExpr) ToUpperCase() Expr { return s.expr.unary("str_upper") }
 // Lengths returns string lengths.
 func (s StrExpr) Lengths() Expr { return s.expr.unary("str_length") }
 
+// StructExpr provides access to fields in struct-valued expressions.
+type StructExpr struct{ expr Expr }
+
+// Struct returns struct field operations for an expression.
+func (e Expr) Struct() StructExpr { return StructExpr{expr: e} }
+
+// Element selects a named field from a struct-valued expression.
+func (s StructExpr) Element(name string) Expr {
+	return Expr{node: &exprNode{kind: exprCall, name: "struct_field", field: name, args: []*exprNode{s.expr.node}}}
+}
+
 // DtExpr provides calendar extraction from Arrow date/timestamp columns.
 type DtExpr struct{ expr Expr }
 
@@ -333,6 +345,9 @@ func formatExpr(n *exprNode) string {
 		}
 		return fmt.Sprintf("%s(%s)", n.name, formatExpr(n.args[0]))
 	case exprCall:
+		if n.name == "struct_field" && len(n.args) == 1 {
+			return fmt.Sprintf("%s.struct().element(%q)", formatExpr(n.args[0]), n.field)
+		}
 		args := make([]string, len(n.args))
 		for i, arg := range n.args {
 			args[i] = formatExpr(arg)

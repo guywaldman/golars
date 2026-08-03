@@ -112,7 +112,7 @@ func (df *DataFrame) Rows() ([]Row, error) {
 	return rows, nil
 }
 
-// ToDicts is a Polars-shaped alias for Rows.
+// ToDicts is a Polars-compatible alias for Rows. Go callers should prefer Rows.
 func (df *DataFrame) ToDicts() ([]Row, error) { return df.Rows() }
 
 // Rows executes a lazy plan and materializes its result as detached row maps.
@@ -128,7 +128,7 @@ func (lf *LazyFrame) Rows(ctx context.Context) ([]Row, error) {
 	return rows, nil
 }
 
-// ToDicts is a Polars-shaped alias for Rows.
+// ToDicts is a Polars-compatible alias for Rows. Go callers should prefer Rows.
 func (lf *LazyFrame) ToDicts(ctx context.Context) ([]Row, error) { return lf.Rows(ctx) }
 
 // Height executes a lazy plan as a stream and counts its rows without retaining
