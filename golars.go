@@ -379,9 +379,15 @@ func All() Expr { return core.All() }
 // Count creates a row-count aggregation expression.
 func Count() Expr { return core.Count() }
 
-// DecodeJSON parses a JSON string expression into the supplied Arrow type.
-func DecodeJSON(expr Expr, schema DataType, options ...JSONDecodeOption) Expr {
-	return core.DecodeJSON(expr, schema, options...)
+// DecodeJSON parses a JSON string expression into a DataType or a Go struct
+// value. Struct targets use exported fields and standard json tags.
+func DecodeJSON(expr Expr, target any, options ...JSONDecodeOption) Expr {
+	return core.DecodeJSON(expr, target, options...)
+}
+
+// DecodeJSONAs parses JSON into the schema derived from T without a zero value.
+func DecodeJSONAs[T any](expr Expr, options ...JSONDecodeOption) Expr {
+	return core.DecodeJSONAs[T](expr, options...)
 }
 
 // WithJSONErrorMode sets the error policy for DecodeJSON.

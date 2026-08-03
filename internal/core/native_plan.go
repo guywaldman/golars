@@ -437,6 +437,9 @@ func marshalNativeExpr(node *exprNode) (nativeExpr, bool, error) {
 			if len(node.args) != 1 {
 				return nativeExpr{}, false, nil
 			}
+			if node.jsonDecode.schemaError != nil {
+				return nativeExpr{}, true, node.jsonDecode.schemaError
+			}
 			if node.jsonDecode.errorMode != JSONNullOnError && node.jsonDecode.errorMode != JSONErrorOnError {
 				return nativeExpr{}, true, fmt.Errorf("golars: invalid JSON error mode %d", node.jsonDecode.errorMode)
 			}

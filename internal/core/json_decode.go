@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/apache/arrow-go/v18/arrow"
 )
@@ -48,15 +49,42 @@ func WithJSONStrictRequiredFields(enabled bool) JSONDecodeOption {
 
 type jsonDecodeConfig struct {
 	schema         DataType
+	schemaError    error
 	errorMode      JSONErrorMode
 	coerce         bool
 	strictRequired bool
 }
 
-// DecodeJSON parses a JSON string expression into the supplied Arrow type.
-// Struct schemas project named object fields and may contain nested structs
-// and lists. Invalid rows become null by default.
-func DecodeJSON(expr Expr, schema DataType, options ...JSONDecodeOption) Expr {
+// DecodeJSON parses a JSON string expression into a DataType or a Go struct
+// value. Struct targets use exported fields and standard json tags; pointers
+// mark nullable fields. Invalid rows become null by default.
+func DecodeJSON(expr Expr, target any, options ...JSONDecodeOption) Expr {
+	schema, schemaErr := jsonDecodeTarget(target)
+	return decodeJSON(expr, schema, schemaErr, options...)
+}
+
+// DecodeJSONAs parses JSON into the schema derived from T. It is the type-only
+// form of DecodeJSON for callers that do not want to create a zero value.
+func DecodeJSONAs[T any](expr Expr, options ...JSONDecodeOption) Expr {
+	schema, schemaErr := dataTypeFromGoType(reflect.TypeOf((*T)(nil)).Elem())
+	return decodeJSON(expr, schema, schemaErr, options...)
+}
+
+func jsonDecodeTarget(target any) (DataType, error) {
+	switch target := target.(type) {
+	case DataType:
+		return target, nil
+	case *DataType:
+		if target == nil {
+			return DataType{}, fmt.Errorf("golars: JSON decode target cannot be nil")
+		}
+		return *target, nil
+	default:
+		return dataTypeFromGoValue(target)
+	}
+}
+
+func decodeJSON(expr Expr, schema DataType, schemaErr error, options ...JSONDecodeOption) Expr {
 	config := jsonDecodeOptions{coerce: true}
 	for _, option := range options {
 		if option != nil {
@@ -69,6 +97,7 @@ func DecodeJSON(expr Expr, schema DataType, options ...JSONDecodeOption) Expr {
 		args: []*exprNode{expr.node},
 		jsonDecode: &jsonDecodeConfig{
 			schema:         schema,
+			schemaError:    schemaErr,
 			errorMode:      config.errorMode,
 			coerce:         config.coerce,
 			strictRequired: config.strictRequired,

@@ -111,9 +111,10 @@ library is embedded.
 
 ## Fast JSON parsing
 
-`DecodeJSON` turns a string expression into a typed Arrow value. Define the
-target with the same descriptors used for DataFrame columns; nested structs and
-lists are supported.
+`DecodeJSON` turns a string expression into a typed Arrow value. You can provide
+an Arrow descriptor or derive the schema directly from a Go struct. Exported
+fields use standard `json` tags; pointer fields are nullable, and nested
+structs and lists are supported.
 
 ```go
 schema := gl.StructOf(
@@ -124,6 +125,22 @@ schema := gl.StructOf(
 
 decoded := gl.DecodeJSON(gl.Col("payload_json"), schema)
 result, err := lf.Select(decoded.Alias("payload")).Collect(ctx)
+```
+
+The struct form avoids a separate schema declaration:
+
+```go
+type Payload struct {
+	ID      int64    `json:"id"`
+	Tenant  string   `json:"tenant"`
+	Tags    []string `json:"tags"`
+	Profile *struct {
+		Country string `json:"country"`
+	} `json:"profile"`
+}
+
+decoded := gl.DecodeJSON(gl.Col("payload_json"), Payload{})
+// Or use gl.DecodeJSONAs[Payload](gl.Col("payload_json")).
 ```
 
 Rows with malformed JSON or incompatible leaves become null by default, while

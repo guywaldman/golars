@@ -8,6 +8,76 @@ import (
 	nativebackend "github.com/guywaldman/golars/internal/native"
 )
 
+type jsonDecodeProfile struct {
+	Country string `json:"country"`
+}
+
+type jsonDecodePayload struct {
+	ID      int64              `json:"id"`
+	Name    string             `json:"name"`
+	Tags    []string           `json:"tags"`
+	Profile *jsonDecodeProfile `json:"profile"`
+	Ignored string             `json:"-"`
+}
+
+func TestDecodeJSONDerivesSchemaFromGoStruct(t *testing.T) {
+	if _, err := nativebackend.Open(); err != nil {
+		t.Skipf("native backend unavailable: %v", err)
+	}
+	raw, err := NewSeries("raw", []string{
+		`{"id":1,"name":"alpha","tags":["a","b"],"profile":{"country":"IL"},"ignored":"hidden"}`,
+		`{"id":2,"name":"beta","tags":[],"profile":null}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	input, err := NewDataFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+
+	decoded := DecodeJSON(Col("raw"), jsonDecodePayload{}).Alias("payload")
+	result, err := input.Lazy().Select(
+		decoded,
+		DecodeJSONAs[jsonDecodePayload](Col("raw")).Alias("payload_by_type"),
+	).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+
+	rows, err := result.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"payload", "payload_by_type"} {
+		payload, ok := rows[0][column].(map[string]any)
+		if !ok || payload["id"] != int64(1) || payload["name"] != "alpha" {
+			t.Fatalf("%s row=%#v, want decoded struct", column, rows[0][column])
+		}
+		if _, exists := payload["ignored"]; exists {
+			t.Fatalf("%s row=%#v contains ignored field", column, payload)
+		}
+	}
+
+	profile, err := input.Lazy().Select(
+		DecodeJSON(Col("raw"), jsonDecodePayload{}).Struct().Element("profile").Struct().Element("country").Alias("country"),
+	).Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer profile.Close()
+	profileRows, err := profile.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profileRows[0]["country"] != "IL" || profileRows[1]["country"] != nil {
+		t.Fatalf("profile rows=%#v", profileRows)
+	}
+}
+
 func TestDecodeJSONProjectsNestedSchemaAndNullsInvalidRows(t *testing.T) {
 	if _, err := nativebackend.Open(); err != nil {
 		t.Skipf("native backend unavailable: %v", err)
