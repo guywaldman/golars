@@ -117,6 +117,16 @@ func TestRowGroupPruningAndRangeReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
+	filtered, err := engine.ScanParquet(store.uri).
+		Filter(Col("value").Gt(Lit(int64(4)))).
+		Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer filtered.Close()
+	if filtered.Height() != 2 || filtered.Width() != 2 {
+		t.Fatalf("unexpected unprojected result shape=(%d,%d)", filtered.Height(), filtered.Width())
+	}
 	result, err := engine.ScanParquet(store.uri).
 		Filter(Col("value").Gt(Lit(int64(4)))).
 		Select(Col("id")).

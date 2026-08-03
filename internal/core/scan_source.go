@@ -51,7 +51,11 @@ func newScanLazyFrameWithEngine(engine *Engine, path string, format formatKind, 
 		if err != nil {
 			return nil, err
 		}
-		return newMultiSource(ctx, engine, paths, format, config)
+		source, err := newMultiSource(ctx, engine, paths, format, config)
+		if err != nil {
+			return nil, err
+		}
+		return withScanBounds(source, config), nil
 	}
 	return newLazyFrame(engine, &planNode{
 		kind:         planSource,
@@ -75,7 +79,11 @@ func scanReader(reader io.Reader, format formatKind, options ...ScanOption) *Laz
 		if reader == nil {
 			return nil, fmt.Errorf("golars: nil input reader")
 		}
-		return openReaderSource(ctx, engine, &nonClosingReader{Reader: reader}, format, config, scanRequestFromContext(ctx))
+		source, err := openReaderSource(ctx, engine, &nonClosingReader{Reader: reader}, format, config, scanRequestFromContext(ctx))
+		if err != nil {
+			return nil, err
+		}
+		return withScanBounds(source, config), nil
 	}
 	return newLazyFrame(engine, &planNode{kind: planSource, source: factory}, nil)
 }
@@ -304,7 +312,7 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 		return nil, fmt.Errorf("golars: remote storage %q requires an Engine object store; local source cannot open it", path)
 	}
 	if format == formatParquet {
-		return parquetio.OpenFile(ctx, path, parquetConfig(engine, config), parquetRequest(request))
+		return parquetio.OpenFile(ctx, path, parquetConfig(engine, config), parquetRequest(config, request))
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -323,7 +331,7 @@ func openLocalSource(ctx context.Context, engine *Engine, path string, format fo
 
 func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, format formatKind, config scanConfig, request scanRequest) (recordSource, error) {
 	if format == formatParquet {
-		return parquetio.OpenReader(ctx, file, parquetConfig(engine, config), parquetRequest(request))
+		return parquetio.OpenReader(ctx, file, parquetConfig(engine, config), parquetRequest(config, request))
 	}
 	if format == formatIPCFile {
 		data, err := io.ReadAll(file)
@@ -332,7 +340,7 @@ func openReaderSource(ctx context.Context, engine *Engine, file io.ReadCloser, f
 			return nil, err
 		}
 		if format == formatParquet {
-			return parquetio.OpenReader(ctx, file, parquetConfig(engine, config), parquetRequest(request))
+			return parquetio.OpenReader(ctx, file, parquetConfig(engine, config), parquetRequest(config, request))
 		}
 		reader, err := ipc.NewFileReader(bytes.NewReader(data))
 		if err != nil {
@@ -360,8 +368,15 @@ func openStreamSource(engine *Engine, file io.ReadCloser, format formatKind, con
 			csv.WithChunk(chunk),
 			csv.WithAllocator(engine.allocator),
 		}
-		if config.hasHeader && len(request.columns) > 0 {
-			options = append(options, csv.WithIncludeColumns(request.columns))
+		columns := scanColumns(config, request)
+		if config.hasHeader && len(columns) > 0 {
+			options = append(options, csv.WithIncludeColumns(columns))
+		}
+		if config.comment != 0 {
+			options = append(options, csv.WithComment(config.comment))
+		}
+		if len(config.nullValues) > 0 {
+			options = append(options, csv.WithNullReader(true, config.nullValues...))
 		}
 		return closeFile(csv.NewInferringReader(file, options...)), nil
 	case formatIPCStream:
@@ -372,7 +387,7 @@ func openStreamSource(engine *Engine, file io.ReadCloser, format formatKind, con
 		}
 		return closeFile(reader), nil
 	case formatNDJSON, formatJSON:
-		table, err := readJSONTable(file, engine.allocator, format == formatJSON, request.columns)
+		table, err := readJSONTable(file, engine.allocator, format == formatJSON, scanColumns(config, request))
 		_ = file.Close()
 		if err != nil {
 			return nil, err
@@ -382,4 +397,26 @@ func openStreamSource(engine *Engine, file io.ReadCloser, format formatKind, con
 		_ = file.Close()
 		return nil, fmt.Errorf("golars: unsupported format")
 	}
+}
+
+func scanColumns(config scanConfig, request scanRequest) []string {
+	if len(request.columns) == 0 {
+		return append([]string(nil), config.columns...)
+	}
+	if len(config.columns) == 0 {
+		return append([]string(nil), request.columns...)
+	}
+	columns := make([]string, 0, len(config.columns)+len(request.columns))
+	seen := make(map[string]struct{}, cap(columns))
+	for _, name := range append(append([]string(nil), config.columns...), request.columns...) {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		columns = append(columns, name)
+	}
+	return columns
 }

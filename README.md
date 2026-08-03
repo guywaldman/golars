@@ -46,7 +46,8 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
 - [X] Eager and lazy `Select`/`SelectSeq`, `Filter`, `WithColumns`/`WithColumnsSeq`,
   `Limit`/`Head`/`Tail`, `Slice`, `Reverse`, `Clear`, `Sort`,
   `GroupBy(...).Agg(...)`, joins, window expressions, `Unique`, `Explode`,
-  `Unnest`, `Drop`, `Rename`, `DropNulls`, and `DropNaNs`.
+  `Unnest`, `Unpivot`/`Melt`, fixed rolling expressions, as-of joins, `Drop`,
+  `Rename`, `DropNulls`, and `DropNaNs`.
 - [X] Expression trees with arithmetic (including modulo, powers, rounding, and
   trigonometric kernels), comparisons, boolean logic, null/NaN handling, casts,
   aggregates, conditional expressions, partitioned windows, descending sort,
@@ -60,7 +61,9 @@ if err := gl.RegisterObjectStore("gs", store); err != nil {
   (categorical/enum), nested list/struct/map, fixed-size, view, interval, and
   run-end encoded types. `DataFrame`/`Series` constructors accept Arrow arrays,
   chunked arrays, tables, and record batches without a copy at the boundary.
-- [X] Lazy scans and eager reads for Parquet, CSV, NDJSON, JSON arrays, and Arrow IPC file/stream formats.
+- [X] Lazy scans and eager reads for Parquet, CSV, NDJSON, JSON arrays, and Arrow IPC file/stream formats (with `ScanArrow`/`ReadArrow` aliases).
+- [X] Scan projection and bounded reads, CSV delimiters, headers, comments,
+  null markers, quote handling, and schema-inference controls.
 - [X] Lazy and eager sinks for the same formats, with non-overwriting local-file defaults. `LazyFrame.Sink` selects the writer from the destination extension.
 - [X] Row-oriented helpers: `Rows` materializes detached row maps, while
   `ForEachRow` streams them without retaining the complete result. `ToDicts`
@@ -84,6 +87,9 @@ Go layer owns the public API, Arrow conversion, and storage adapters (including
 custom object stores and formats Polars does not open directly). The
 target-specific native library is embedded in the Go module and loaded with
 CGO-free FFI, so consumers only need the normal `go get` and Go build workflow.
+For object-store scans, the Go adapter preserves projected columns, simple
+Parquet predicates, row-group pruning, and bounded reads before handing Arrow
+batches to Polars.
 
 The checked-in assets currently support Linux amd64/arm64 and macOS arm64.
 A target without an embedded asset returns an explicit native-backend

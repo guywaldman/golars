@@ -23,6 +23,13 @@ type nativeQuery struct {
 	Input      string            `json:"input,omitempty"`
 	HasHeader  bool              `json:"has_header,omitempty"`
 	Delimiter  string            `json:"delimiter,omitempty"`
+	Columns    []string          `json:"columns,omitempty"`
+	SkipRows   uint64            `json:"skip_rows,omitempty"`
+	NRows      *uint64           `json:"n_rows,omitempty"`
+	Comment    string            `json:"comment,omitempty"`
+	NullValues []string          `json:"null_values,omitempty"`
+	Quote      *string           `json:"quote,omitempty"`
+	InferRows  *uint64           `json:"infer_schema_length,omitempty"`
 	Operations []nativeOperation `json:"operations,omitempty"`
 }
 
@@ -32,6 +39,12 @@ type nativeOperation struct {
 	Keys      []nativeExpr `json:"keys,omitempty"`
 	RightKeys []nativeExpr `json:"right_keys,omitempty"`
 	Columns   []string     `json:"columns,omitempty"`
+	Index     []string     `json:"index,omitempty"`
+	Variable  string       `json:"variable,omitempty"`
+	Value     string       `json:"value,omitempty"`
+	Strategy  string       `json:"strategy,omitempty"`
+	AllowEq   bool         `json:"allow_eq,omitempty"`
+	CheckSort bool         `json:"check_sortedness,omitempty"`
 	JoinType  string       `json:"join_type,omitempty"`
 	Suffix    string       `json:"suffix,omitempty"`
 	Right     *nativeQuery `json:"right,omitempty"`
@@ -79,6 +92,10 @@ func marshalNativePlan(ctx context.Context, engine *Engine, root *planNode) ([]b
 }
 
 func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (nativeQuery, bool, error) {
+	return nativeQueryForPlanWithRequest(ctx, engine, root, scanRequestForPlan(root))
+}
+
+func nativeQueryForPlanWithRequest(ctx context.Context, engine *Engine, root *planNode, request scanRequest) (nativeQuery, bool, error) {
 	if root == nil {
 		return nativeQuery{}, false, nil
 	}
@@ -98,9 +115,9 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 		query = nativeQuery{Format: "ipc", Input: base64.StdEncoding.EncodeToString(input)}
 		ok = true
 	case planSource:
-		query, ok, err = nativeSourceQuery(ctx, engine, root)
+		query, ok, err = nativeSourceQuery(ctx, engine, root, request)
 	default:
-		query, ok, err = nativeQueryForPlan(ctx, engine, root.input)
+		query, ok, err = nativeQueryForPlanWithRequest(ctx, engine, root.input, request)
 		if err != nil || !ok {
 			return nativeQuery{}, ok, err
 		}
@@ -195,6 +212,12 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 				return nativeQuery{}, rightOK, rightErr
 			}
 			operation.Kind = "join"
+			if root.asof {
+				operation.Kind = "join_asof"
+				operation.Strategy = root.asofStrategy.String()
+				operation.AllowEq = root.asofAllowExact
+				operation.CheckSort = root.asofCheckSorted
+			}
 			operation.Exprs = leftKeys
 			operation.RightKeys = rightKeys
 			operation.Right = &right
@@ -209,6 +232,12 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 		case planUnnest:
 			operation.Kind = "unnest"
 			operation.Columns = append([]string(nil), root.columns...)
+		case planUnpivot:
+			operation.Kind = "unpivot"
+			operation.Columns = append([]string(nil), root.columns...)
+			operation.Index = append([]string(nil), root.indexColumns...)
+			operation.Variable = root.variableName
+			operation.Value = root.valueName
 		default:
 			return nativeQuery{}, false, nil
 		}
@@ -217,7 +246,7 @@ func nativeQueryForPlan(ctx context.Context, engine *Engine, root *planNode) (na
 	return query, ok, err
 }
 
-func nativeSourceQuery(ctx context.Context, engine *Engine, node *planNode) (nativeQuery, bool, error) {
+func nativeSourceQuery(ctx context.Context, engine *Engine, node *planNode, request scanRequest) (nativeQuery, bool, error) {
 	format, ok := nativeFormat(node.sourceFormat)
 	if !ok {
 		return nativeQuery{}, false, nil
@@ -228,16 +257,39 @@ func nativeSourceQuery(ctx context.Context, engine *Engine, node *planNode) (nat
 	// Polars.
 	if node.sourcePath != "" && storageuri.Scheme(node.sourcePath) == "" && node.sourceFormat != formatJSON && node.sourceFormat != formatNDJSON {
 		query := nativeQuery{Path: node.sourcePath, Format: format}
-		if node.sourceFormat == formatCSV {
-			query.HasHeader = node.sourceConfig.hasHeader
-			query.Delimiter = string(node.sourceConfig.delimiter)
+		query.HasHeader = node.sourceConfig.hasHeader
+		query.Delimiter = string(node.sourceConfig.delimiter)
+		// Let Polars optimize the projection for local sources. Explicit scan
+		// columns remain a source-level restriction, while plan-derived names
+		// may not exist until a later operation (for example an alias).
+		query.Columns = append([]string(nil), node.sourceConfig.columns...)
+		if node.sourceConfig.skipRows > 0 {
+			query.SkipRows = uint64(node.sourceConfig.skipRows)
+		}
+		if node.sourceConfig.nRows >= 0 {
+			nRows := uint64(node.sourceConfig.nRows)
+			query.NRows = &nRows
+		}
+		if node.sourceConfig.comment != 0 {
+			query.Comment = string(node.sourceConfig.comment)
+		}
+		if len(node.sourceConfig.nullValues) > 0 {
+			query.NullValues = append([]string(nil), node.sourceConfig.nullValues...)
+		}
+		if node.sourceConfig.quoteSet {
+			quote := string(node.sourceConfig.quote)
+			query.Quote = &quote
+		}
+		if node.sourceConfig.inferSchemaLength >= 0 {
+			inferRows := uint64(node.sourceConfig.inferSchemaLength)
+			query.InferRows = &inferRows
 		}
 		return query, true, nil
 	}
 	if node.source == nil || engine == nil {
 		return nativeQuery{}, false, nil
 	}
-	source, err := node.source(ctx, engine)
+	source, err := node.source(withScanRequest(ctx, request), engine)
 	if err != nil {
 		return nativeQuery{}, true, err
 	}

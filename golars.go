@@ -137,6 +137,16 @@ type (
 	JoinType = core.JoinType
 	// JoinOption configures a join.
 	JoinOption = core.JoinOption
+	// AsOfJoinOption configures an as-of join.
+	AsOfJoinOption = core.AsOfJoinOption
+	// AsofStrategy selects nearest-key matching direction.
+	AsofStrategy = core.AsofStrategy
+	// AsOfStrategy is the conventional initialism spelling of AsofStrategy.
+	AsOfStrategy = core.AsOfStrategy
+	// RollingOption configures a fixed-size rolling expression.
+	RollingOption = core.RollingOption
+	// UnpivotOption configures an unpivot operation.
+	UnpivotOption = core.UnpivotOption
 	// Engine owns shared execution configuration and object stores.
 	Engine = core.Engine
 	// EngineOption configures an Engine.
@@ -187,6 +197,21 @@ const (
 	JoinAnti = core.JoinAnti
 	// JoinCross computes the Cartesian product.
 	JoinCross = core.JoinCross
+)
+
+const (
+	// AsofBackward matches the last right key less than or equal to the left key.
+	AsofBackward = core.AsofBackward
+	// AsofForward matches the first right key greater than or equal to the left key.
+	AsofForward = core.AsofForward
+	// AsofNearest matches the closest right key.
+	AsofNearest = core.AsofNearest
+	// AsOfBackward is an alias for AsofBackward.
+	AsOfBackward = core.AsOfBackward
+	// AsOfForward is an alias for AsofForward.
+	AsOfForward = core.AsOfForward
+	// AsOfNearest is an alias for AsofNearest.
+	AsOfNearest = core.AsOfNearest
 )
 
 // Timestamp creates a timestamp type with the given unit and timezone.
@@ -390,6 +415,27 @@ func WithDelimiter(delimiter rune) ScanOption {
 // WithScanBatchSize sets the preferred scan batch size.
 func WithScanBatchSize(rows int64) ScanOption { return core.WithScanBatchSize(rows) }
 
+// WithColumns limits a scan to the named columns.
+func WithColumns(columns ...string) ScanOption { return core.WithColumns(columns...) }
+
+// WithSkipRows skips rows before a CSV header/data section.
+func WithSkipRows(rows int64) ScanOption { return core.WithSkipRows(rows) }
+
+// WithNRows limits the number of rows read from a source.
+func WithNRows(rows int64) ScanOption { return core.WithNRows(rows) }
+
+// WithComment ignores CSV records beginning with comment.
+func WithComment(comment rune) ScanOption { return core.WithComment(comment) }
+
+// WithNullValues treats supplied CSV values as null.
+func WithNullValues(values ...string) ScanOption { return core.WithNullValues(values...) }
+
+// WithQuoteChar sets the CSV quote character; zero disables quoting.
+func WithQuoteChar(quote rune) ScanOption { return core.WithQuoteChar(quote) }
+
+// WithInferSchemaLength sets the number of CSV rows used for type inference.
+func WithInferSchemaLength(rows int64) ScanOption { return core.WithInferSchemaLength(rows) }
+
 // WithOverwrite controls whether an existing output is replaced.
 func WithOverwrite(enabled bool) WriteOption { return core.WithOverwrite(enabled) }
 
@@ -413,6 +459,52 @@ func WithJoinType(how JoinType) JoinOption { return core.WithJoinType(how) }
 
 // WithJoinSuffix sets the suffix for overlapping right-side columns.
 func WithJoinSuffix(suffix string) JoinOption { return core.WithJoinSuffix(suffix) }
+
+// WithAsofStrategy selects an as-of matching direction.
+func WithAsofStrategy(strategy AsofStrategy) AsOfJoinOption {
+	return core.WithAsofStrategy(strategy)
+}
+
+// WithAsOfStrategy is an alias for WithAsofStrategy.
+func WithAsOfStrategy(strategy AsOfStrategy) AsOfJoinOption {
+	return core.WithAsOfStrategy(strategy)
+}
+
+// WithAsofAllowExact controls whether equal keys may match.
+func WithAsofAllowExact(enabled bool) AsOfJoinOption {
+	return core.WithAsofAllowExact(enabled)
+}
+
+// WithAsOfAllowExact is an alias for WithAsofAllowExact.
+func WithAsOfAllowExact(enabled bool) AsOfJoinOption {
+	return core.WithAsOfAllowExact(enabled)
+}
+
+// WithAsofCheckSortedness asks the native engine to validate key ordering.
+func WithAsofCheckSortedness(enabled bool) AsOfJoinOption {
+	return core.WithAsofCheckSortedness(enabled)
+}
+
+// WithAsOfCheckSortedness is an alias for WithAsofCheckSortedness.
+func WithAsOfCheckSortedness(enabled bool) AsOfJoinOption {
+	return core.WithAsOfCheckSortedness(enabled)
+}
+
+// WithRollingMinPeriods sets the minimum values required by a rolling result.
+func WithRollingMinPeriods(periods int64) RollingOption {
+	return core.WithRollingMinPeriods(periods)
+}
+
+// WithRollingCenter centers a rolling window around each row.
+func WithRollingCenter(enabled bool) RollingOption { return core.WithRollingCenter(enabled) }
+
+// WithUnpivotVariableName sets the generated variable column name.
+func WithUnpivotVariableName(name string) UnpivotOption {
+	return core.WithUnpivotVariableName(name)
+}
+
+// WithUnpivotValueName sets the generated value column name.
+func WithUnpivotValueName(name string) UnpivotOption { return core.WithUnpivotValueName(name) }
 
 // WithPartitionBy sets dataset partition columns.
 func WithPartitionBy(columns ...string) DatasetWriteOption {
@@ -459,6 +551,11 @@ func ScanIPCFile(path string, options ...ScanOption) *LazyFrame {
 	return core.ScanIPCFile(path, options...)
 }
 
+// ScanArrow creates a lazy Arrow IPC file scan.
+func ScanArrow(path string, options ...ScanOption) *LazyFrame {
+	return core.ScanArrow(path, options...)
+}
+
 // ScanIPCStream creates a lazy Arrow IPC stream scan.
 func ScanIPCStream(path string, options ...ScanOption) *LazyFrame {
 	return core.ScanIPCStream(path, options...)
@@ -487,6 +584,11 @@ func ReadJSON(ctx context.Context, path string, options ...ScanOption) (*DataFra
 // ReadIPCFile reads an Arrow IPC file into an eager DataFrame.
 func ReadIPCFile(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
 	return core.ReadIPCFile(ctx, path, options...)
+}
+
+// ReadArrow reads an Arrow IPC file into an eager DataFrame.
+func ReadArrow(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
+	return core.ReadArrow(ctx, path, options...)
 }
 
 // ScanCSVReader creates a lazy CSV scan from a reader.
@@ -552,6 +654,11 @@ func WriteJSON(ctx context.Context, df *DataFrame, destination string, options .
 // WriteIPCFile writes a DataFrame as an Arrow IPC file.
 func WriteIPCFile(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return core.WriteIPCFile(ctx, df, destination, options...)
+}
+
+// WriteArrow writes a DataFrame as an Arrow IPC file.
+func WriteArrow(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
+	return core.WriteArrow(ctx, df, destination, options...)
 }
 
 // WriteIPCStream writes a DataFrame as an Arrow IPC stream.

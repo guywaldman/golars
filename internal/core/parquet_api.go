@@ -22,10 +22,10 @@ func parquetMissingColumn(name string, available []string) error {
 	return &ColumnNotFoundError{Name: name, Available: available}
 }
 
-func parquetRequest(request scanRequest) parquetio.Request {
+func parquetRequest(config scanConfig, request scanRequest) parquetio.Request {
 	predicates, applicable := parquetPredicates(request.filters)
 	return parquetio.Request{
-		Columns:               request.columns,
+		Columns:               scanColumns(config, request),
 		ProjectionColumns:     request.projectionColumns,
 		FilterOnlyColumns:     request.filterOnlyColumns,
 		ProjectionOnlyBatches: request.projectionOnlyBatches,
@@ -36,7 +36,7 @@ func parquetRequest(request scanRequest) parquetio.Request {
 }
 
 func openRangedParquetSource(ctx context.Context, engine *Engine, store RangeObjectStore, path string, config scanConfig, request scanRequest) (recordSource, error) {
-	return parquetio.OpenRanged(ctx, store, path, parquetConfig(engine, config), parquetRequest(request))
+	return parquetio.OpenRanged(ctx, store, path, parquetConfig(engine, config), parquetRequest(config, request))
 }
 
 func parquetPredicates(filters []*exprNode) ([]parquetio.Predicate, bool) {

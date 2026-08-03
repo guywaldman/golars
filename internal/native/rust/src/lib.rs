@@ -140,6 +140,20 @@ struct QueryRequest {
     #[serde(default)]
     delimiter: String,
     #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    skip_rows: u64,
+    #[serde(default)]
+    n_rows: Option<u64>,
+    #[serde(default)]
+    comment: String,
+    #[serde(default)]
+    null_values: Vec<String>,
+    #[serde(default)]
+    quote: Option<String>,
+    #[serde(default)]
+    infer_schema_length: Option<u64>,
+    #[serde(default)]
     operations: Vec<QueryOperation>,
 }
 
@@ -154,6 +168,18 @@ struct QueryOperation {
     right_keys: Vec<QueryExpr>,
     #[serde(default)]
     columns: Vec<String>,
+    #[serde(default)]
+    index: Vec<String>,
+    #[serde(default)]
+    variable: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    strategy: String,
+    #[serde(default)]
+    allow_eq: bool,
+    #[serde(default)]
+    check_sortedness: bool,
     #[serde(default)]
     join_type: String,
     #[serde(default)]
@@ -270,13 +296,25 @@ fn build_query(request: &QueryRequest) -> Result<LazyFrame, String> {
                 let expressions = to_exprs(&operation.exprs)?;
                 frame.group_by_stable(keys).agg(expressions)
             }
-            "join" => {
+            "join" | "join_asof" => {
                 let right = operation
                     .right
                     .as_deref()
                     .ok_or_else(|| "native join is missing its right query".to_owned())?;
                 let right = build_query(right)?;
-                let join_type = to_join_type(&operation.join_type)?;
+                let join_type = if operation.kind == "join_asof" {
+                    JoinType::AsOf(Box::new(AsOfOptions {
+                        strategy: to_asof_strategy(&operation.strategy)?,
+                        tolerance: None,
+                        tolerance_str: None,
+                        left_by: None,
+                        right_by: None,
+                        allow_eq: operation.allow_eq,
+                        check_sortedness: operation.check_sortedness,
+                    }))
+                } else {
+                    to_join_type(&operation.join_type)?
+                };
                 frame
                     .join_builder()
                     .with(right)
@@ -299,6 +337,32 @@ fn build_query(request: &QueryRequest) -> Result<LazyFrame, String> {
             }
             "explode" => frame.explode(cols(operation.columns.clone())),
             "unnest" => frame.unnest(cols(operation.columns.clone()), None),
+            "unpivot" => {
+                let on = if operation.columns.is_empty() {
+                    all().exclude_cols(operation.index.clone())
+                } else {
+                    by_name(operation.columns.clone(), true)
+                };
+                let index = if operation.index.is_empty() {
+                    all().exclude_cols(operation.columns.clone())
+                } else {
+                    by_name(operation.index.clone(), true)
+                };
+                frame.unpivot(UnpivotArgsDSL {
+                    on,
+                    index,
+                    variable_name: Some(if operation.variable.is_empty() {
+                        "variable".into()
+                    } else {
+                        operation.variable.clone().into()
+                    }),
+                    value_name: Some(if operation.value.is_empty() {
+                        "value".into()
+                    } else {
+                        operation.value.clone().into()
+                    }),
+                })
+            }
             kind => return Err(format!("unsupported native operation {kind:?}")),
         };
     }
@@ -319,35 +383,105 @@ fn source_frame(request: &QueryRequest) -> Result<LazyFrame, String> {
         return Err("native query has neither a path nor IPC input".to_owned());
     }
     match request.format.as_str() {
-        "parquet" => LazyFrame::scan_parquet(
-            PlPath::new(request.path.as_str()),
-            ScanArgsParquet::default(),
-        )
-        .map_err(|error| error.to_string()),
+        "parquet" => {
+            let mut args = ScanArgsParquet::default();
+            if request.skip_rows == 0 {
+                args.n_rows = request.n_rows.map(|rows| rows as usize);
+            } else if let Some(rows) = request.n_rows {
+                args.n_rows = Some((request.skip_rows + rows) as usize);
+            }
+            let mut frame = LazyFrame::scan_parquet(PlPath::new(request.path.as_str()), args)
+                .map_err(|error| error.to_string())?;
+            if request.skip_rows > 0 || request.n_rows.is_some() {
+                frame = frame.slice(
+                    request.skip_rows as i64,
+                    request.n_rows.unwrap_or(usize::MAX as u64) as IdxSize,
+                );
+            }
+            if !request.columns.is_empty() {
+                frame = frame.select(projection_exprs(&request.columns));
+            }
+            Ok(frame)
+        }
         "csv" => {
             let mut reader = LazyCsvReader::new(PlPath::new(request.path.as_str()))
                 .with_has_header(request.has_header);
             if let Some(delimiter) = request.delimiter.as_bytes().first().copied() {
                 reader = reader.with_separator(delimiter);
             }
-            reader.finish().map_err(|error| error.to_string())
+            if request.skip_rows > 0 {
+                reader = reader.with_skip_rows(request.skip_rows as usize);
+            }
+            if let Some(rows) = request.n_rows {
+                reader = reader.with_n_rows(Some(rows as usize));
+            }
+            if let Some(infer_rows) = request.infer_schema_length {
+                reader = reader.with_infer_schema_length(Some(infer_rows as usize));
+            }
+            if !request.comment.is_empty() {
+                reader = reader.with_comment_prefix(Some(request.comment.clone().into()));
+            }
+            if let Some(quote) = &request.quote {
+                reader = reader.with_quote_char(quote.as_bytes().first().copied());
+            }
+            if !request.null_values.is_empty() {
+                reader = reader.with_null_values(Some(NullValues::AllColumns(
+                    request
+                        .null_values
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect(),
+                )));
+            }
+            let mut frame = reader.finish().map_err(|error| error.to_string())?;
+            if !request.columns.is_empty() {
+                frame = frame.select(projection_exprs(&request.columns));
+            }
+            Ok(frame)
         }
         "ipc_file" => LazyFrame::scan_ipc(
             PlPath::new(request.path.as_str()),
             IpcScanOptions::default(),
             UnifiedScanArgs::default(),
         )
+        .map(|mut frame| {
+            if request.skip_rows > 0 || request.n_rows.is_some() {
+                frame = frame.slice(
+                    request.skip_rows as i64,
+                    request.n_rows.unwrap_or(usize::MAX as u64) as IdxSize,
+                );
+            }
+            if !request.columns.is_empty() {
+                frame = frame.select(projection_exprs(&request.columns));
+            }
+            frame
+        })
         .map_err(|error| error.to_string()),
         "ipc_stream" => {
-            let dataframe = IpcStreamReader::new(
+            let mut dataframe = IpcStreamReader::new(
                 File::open(request.path.as_str()).map_err(|error| error.to_string())?,
             )
             .finish()
             .map_err(|error| error.to_string())?;
-            Ok(dataframe.lazy())
+            if request.skip_rows > 0 || request.n_rows.is_some() {
+                dataframe = dataframe.slice(
+                    request.skip_rows as i64,
+                    request.n_rows.unwrap_or(usize::MAX as u64) as usize,
+                );
+            }
+            let mut frame = dataframe.lazy();
+            if !request.columns.is_empty() {
+                frame = frame.select(projection_exprs(&request.columns));
+            }
+            Ok(frame)
         }
         format => Err(format!("unsupported native format {format:?}")),
     }
+}
+
+fn projection_exprs(columns: &[String]) -> Vec<Expr> {
+    columns.iter().map(|name| col(name.as_str())).collect()
 }
 
 fn dataframe_ipc(
@@ -540,6 +674,19 @@ fn one_arg(expression: &QueryExpr) -> Result<Expr, String> {
     to_expr(&expression.args[0])
 }
 
+fn first_arg(expression: &QueryExpr) -> Result<Expr, String> {
+    expression
+        .args
+        .first()
+        .ok_or_else(|| {
+            format!(
+                "native expression {:?} requires an argument",
+                expression.name
+            )
+        })
+        .and_then(to_expr)
+}
+
 fn two_args(expression: &QueryExpr) -> Result<(Expr, Expr), String> {
     if expression.args.len() != 2 {
         return Err(format!(
@@ -585,6 +732,40 @@ fn literal_string(expression: &QueryExpr) -> Result<String, String> {
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| "native expression argument must be a string literal".to_owned())
+}
+
+fn literal_bool(expression: &QueryExpr) -> Result<bool, String> {
+    let literal = expression
+        .literal
+        .as_ref()
+        .ok_or_else(|| "native expression argument must be a boolean literal".to_owned())?;
+    literal
+        .value
+        .as_bool()
+        .ok_or_else(|| "native expression argument must be a boolean literal".to_owned())
+}
+
+fn rolling_options(expression: &QueryExpr) -> Result<RollingOptionsFixedWindow, String> {
+    if expression.args.len() != 4 {
+        return Err("native rolling expression requires a value, window size, minimum periods, and center flag".to_owned());
+    }
+    let window_size = literal_i64(&expression.args[1])?;
+    let min_periods = literal_i64(&expression.args[2])?;
+    if window_size <= 0 {
+        return Err("native rolling window size must be positive".to_owned());
+    }
+    if min_periods < 0 || min_periods > window_size {
+        return Err(
+            "native rolling minimum periods must be between zero and the window size".to_owned(),
+        );
+    }
+    Ok(RollingOptionsFixedWindow {
+        window_size: window_size as usize,
+        min_periods: min_periods as usize,
+        weights: None,
+        center: literal_bool(&expression.args[3])?,
+        fn_params: None,
+    })
 }
 
 fn to_aggregate(expression: &QueryExpr) -> Result<Expr, String> {
@@ -741,6 +922,12 @@ fn to_call(expression: &QueryExpr) -> Result<Expr, String> {
         "reverse" => Ok(one_arg(expression)?.reverse()),
         "unique" => Ok(one_arg(expression)?.unique()),
         "explode" => Ok(one_arg(expression)?.explode()),
+        "rolling_mean" => Ok(first_arg(expression)?.rolling_mean(rolling_options(expression)?)),
+        "rolling_sum" => Ok(first_arg(expression)?.rolling_sum(rolling_options(expression)?)),
+        "rolling_min" => Ok(first_arg(expression)?.rolling_min(rolling_options(expression)?)),
+        "rolling_max" => Ok(first_arg(expression)?.rolling_max(rolling_options(expression)?)),
+        "rolling_std" => Ok(first_arg(expression)?.rolling_std(rolling_options(expression)?)),
+        "rolling_var" => Ok(first_arg(expression)?.rolling_var(rolling_options(expression)?)),
         "str_contains" => {
             let (left, right) = two_args(expression)?;
             Ok(left.str().contains(right, false))
@@ -1094,6 +1281,15 @@ fn to_join_type(name: &str) -> Result<JoinType, String> {
         "anti" => Ok(JoinType::Anti),
         "cross" => Ok(JoinType::Cross),
         name => Err(format!("unsupported native join type {name:?}")),
+    }
+}
+
+fn to_asof_strategy(name: &str) -> Result<AsofStrategy, String> {
+    match name {
+        "backward" | "" => Ok(AsofStrategy::Backward),
+        "forward" => Ok(AsofStrategy::Forward),
+        "nearest" => Ok(AsofStrategy::Nearest),
+        name => Err(format!("unsupported native as-of strategy {name:?}")),
     }
 }
 

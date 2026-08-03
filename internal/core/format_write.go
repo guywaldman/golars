@@ -125,6 +125,11 @@ func WriteIPCFile(ctx context.Context, df *DataFrame, destination string, option
 	})
 }
 
+// WriteArrow writes a DataFrame as an Arrow IPC file.
+func WriteArrow(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
+	return WriteIPCFile(ctx, df, destination, options...)
+}
+
 // WriteIPCStream writes a DataFrame as an Arrow IPC stream.
 func WriteIPCStream(ctx context.Context, df *DataFrame, destination string, options ...WriteOption) error {
 	return writeWithFile(ctx, df, destination, options, func(file io.Writer, table arrow.Table, config writeConfig) error {

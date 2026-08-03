@@ -235,6 +235,68 @@ func (e Expr) RowNumber() Expr { return e.unary("row_number") }
 // CumSum computes a cumulative sum.
 func (e Expr) CumSum() Expr { return e.unary("cum_sum") }
 
+// RollingMean computes a trailing fixed-size rolling mean. The default
+// minimum period count is the window size; use WithRollingMinPeriods to
+// override it.
+func (e Expr) RollingMean(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_mean", windowSize, options...)
+}
+
+// RollingSum computes a trailing fixed-size rolling sum.
+func (e Expr) RollingSum(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_sum", windowSize, options...)
+}
+
+// RollingMin computes a trailing fixed-size rolling minimum.
+func (e Expr) RollingMin(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_min", windowSize, options...)
+}
+
+// RollingMax computes a trailing fixed-size rolling maximum.
+func (e Expr) RollingMax(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_max", windowSize, options...)
+}
+
+// RollingStd computes a trailing fixed-size rolling standard deviation.
+func (e Expr) RollingStd(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_std", windowSize, options...)
+}
+
+// RollingVar computes a trailing fixed-size rolling variance.
+func (e Expr) RollingVar(windowSize int64, options ...RollingOption) Expr {
+	return e.rolling("rolling_var", windowSize, options...)
+}
+
+type rollingConfig struct {
+	windowSize int64
+	minPeriods int64
+	center     bool
+}
+
+// RollingOption configures a fixed-size rolling expression.
+type RollingOption func(*rollingConfig)
+
+// WithRollingMinPeriods sets the minimum number of non-null values required
+// to produce a rolling result.
+func WithRollingMinPeriods(periods int64) RollingOption {
+	return func(config *rollingConfig) { config.minPeriods = periods }
+}
+
+// WithRollingCenter centers the rolling window around each row.
+func WithRollingCenter(enabled bool) RollingOption {
+	return func(config *rollingConfig) { config.center = enabled }
+}
+
+func (e Expr) rolling(name string, windowSize int64, options ...RollingOption) Expr {
+	config := rollingConfig{windowSize: windowSize, minPeriods: windowSize}
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
+	return e.call(name, Lit(config.windowSize), Lit(config.minPeriods), Lit(config.center))
+}
+
 func (e Expr) aggregate(name string) Expr {
 	return Expr{&exprNode{kind: exprAggregate, name: name, args: []*exprNode{e.node}}}
 }

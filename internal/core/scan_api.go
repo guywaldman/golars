@@ -74,6 +74,11 @@ func ScanIPCFile(path string, options ...ScanOption) *LazyFrame {
 	return scanFormat(path, formatIPCFile, options...)
 }
 
+// ScanArrow creates a lazy Arrow IPC file scan.
+func ScanArrow(path string, options ...ScanOption) *LazyFrame {
+	return ScanIPCFile(path, options...)
+}
+
 // ScanIPCStream creates a lazy Arrow IPC stream scan.
 func ScanIPCStream(path string, options ...ScanOption) *LazyFrame {
 	return scanFormat(path, formatIPCStream, options...)
@@ -102,6 +107,11 @@ func (e *Engine) ScanJSON(path string, options ...ScanOption) *LazyFrame {
 // ScanIPCFile creates a lazy Arrow IPC file scan on an Engine.
 func (e *Engine) ScanIPCFile(path string, options ...ScanOption) *LazyFrame {
 	return e.scanFormat(path, formatIPCFile, options...)
+}
+
+// ScanArrow creates a lazy Arrow IPC file scan on an Engine.
+func (e *Engine) ScanArrow(path string, options ...ScanOption) *LazyFrame {
+	return e.ScanIPCFile(path, options...)
 }
 
 // ScanIPCStream creates a lazy Arrow IPC stream scan on an Engine.
@@ -134,6 +144,11 @@ func (e *Engine) ReadIPCFile(ctx context.Context, path string, options ...ScanOp
 	return e.ScanIPCFile(path, options...).Collect(ctx)
 }
 
+// ReadArrow reads an Arrow IPC file into an eager DataFrame on an Engine.
+func (e *Engine) ReadArrow(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
+	return e.ReadIPCFile(ctx, path, options...)
+}
+
 // ReadParquet reads a Parquet path into an eager DataFrame.
 func ReadParquet(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
 	return ScanParquet(path, options...).Collect(ctx)
@@ -157,6 +172,11 @@ func ReadJSON(ctx context.Context, path string, options ...ScanOption) (*DataFra
 // ReadIPCFile reads an Arrow IPC file into an eager DataFrame.
 func ReadIPCFile(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
 	return ScanIPCFile(path, options...).Collect(ctx)
+}
+
+// ReadArrow reads an Arrow IPC file into an eager DataFrame.
+func ReadArrow(ctx context.Context, path string, options ...ScanOption) (*DataFrame, error) {
+	return ReadIPCFile(ctx, path, options...)
 }
 
 // ScanCSVReader creates a lazy CSV scan from a reader.

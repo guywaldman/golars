@@ -433,6 +433,18 @@ func (df *DataFrame) Unnest(columns ...string) (*DataFrame, error) {
 	return plan.Collect(context.Background())
 }
 
+// Unpivot converts selected wide columns into variable/value rows.
+func (df *DataFrame) Unpivot(on, index []string, options ...UnpivotOption) (*DataFrame, error) {
+	plan := df.Lazy().Unpivot(on, index, options...)
+	defer plan.Close()
+	return plan.Collect(context.Background())
+}
+
+// Melt is an alias for Unpivot.
+func (df *DataFrame) Melt(on, index []string, options ...UnpivotOption) (*DataFrame, error) {
+	return df.Unpivot(on, index, options...)
+}
+
 // WriteParquet writes the frame as Parquet.
 func (df *DataFrame) WriteParquet(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteParquet(ctx, df, destination, options...)
@@ -456,6 +468,11 @@ func (df *DataFrame) WriteNDJSON(ctx context.Context, destination string, option
 // WriteIPCFile writes the frame as an Arrow IPC file.
 func (df *DataFrame) WriteIPCFile(ctx context.Context, destination string, options ...WriteOption) error {
 	return WriteIPCFile(ctx, df, destination, options...)
+}
+
+// WriteArrow writes the frame as an Arrow IPC file.
+func (df *DataFrame) WriteArrow(ctx context.Context, destination string, options ...WriteOption) error {
+	return df.WriteIPCFile(ctx, destination, options...)
 }
 
 // GroupBy starts an eager grouped aggregation.

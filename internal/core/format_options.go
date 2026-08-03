@@ -4,13 +4,24 @@ package core
 type ScanOption func(*scanConfig)
 
 type scanConfig struct {
-	hasHeader bool
-	delimiter rune
-	batchSize int64
+	hasHeader         bool
+	delimiter         rune
+	batchSize         int64
+	columns           []string
+	skipRows          int64
+	nRows             int64
+	comment           rune
+	nullValues        []string
+	quote             rune
+	quoteSet          bool
+	inferSchemaLength int64
 }
 
 func defaultScanConfig(engine *Engine) scanConfig {
-	return scanConfig{hasHeader: true, delimiter: ',', batchSize: engine.batchSize}
+	return scanConfig{
+		hasHeader: true, delimiter: ',', batchSize: engine.batchSize,
+		nRows: -1, inferSchemaLength: 100,
+	}
 }
 
 // WithHasHeader controls whether delimited input has a header row.
@@ -30,6 +41,62 @@ func WithScanBatchSize(rows int64) ScanOption {
 	return func(c *scanConfig) {
 		if rows > 0 {
 			c.batchSize = rows
+		}
+	}
+}
+
+// WithColumns limits a scan to the named columns before executing the plan.
+func WithColumns(columns ...string) ScanOption {
+	return func(c *scanConfig) {
+		c.columns = append([]string(nil), columns...)
+	}
+}
+
+// WithSkipRows skips rows before the scan's header/data rows.
+func WithSkipRows(rows int64) ScanOption {
+	return func(c *scanConfig) {
+		if rows >= 0 {
+			c.skipRows = rows
+		}
+	}
+}
+
+// WithNRows limits the number of rows read from the source. A negative value
+// disables the limit.
+func WithNRows(rows int64) ScanOption {
+	return func(c *scanConfig) {
+		if rows >= 0 {
+			c.nRows = rows
+		}
+	}
+}
+
+// WithComment ignores CSV records beginning with comment.
+func WithComment(comment rune) ScanOption {
+	return func(c *scanConfig) { c.comment = comment }
+}
+
+// WithNullValues treats the supplied CSV values as null.
+func WithNullValues(values ...string) ScanOption {
+	return func(c *scanConfig) { c.nullValues = append([]string(nil), values...) }
+}
+
+// WithQuoteChar sets the CSV quote character. Passing zero disables quoting.
+func WithQuoteChar(quote rune) ScanOption {
+	return func(c *scanConfig) {
+		c.quote = quote
+		c.quoteSet = true
+	}
+}
+
+// WithInferSchemaLength sets the number of CSV rows used for type inference.
+// A negative value requests a full-file inference scan.
+func WithInferSchemaLength(rows int64) ScanOption {
+	return func(c *scanConfig) {
+		if rows >= 0 {
+			c.inferSchemaLength = rows
+		} else {
+			c.inferSchemaLength = -1
 		}
 	}
 }

@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 base64 = "0.22"
-polars = { version = "0.52.0", default-features = false, features = ["ipc", "ipc_streaming", "lazy", "parquet", "csv", "strings", "regex", "temporal", "timezones", "dtype-struct", "dtype-array", "is_between", "is_in", "cum_agg", "rank", "semi_anti_join", "cross_join", "abs", "round_series", "trigonometry", "log", "product", "json", "list_any_all", "list_gather", "list_filter", "list_drop_nulls", "list_count", "list_sets", "list_to_struct", "top_k"] }
+polars = { version = "0.52.0", default-features = false, features = ["ipc", "ipc_streaming", "lazy", "parquet", "csv", "strings", "regex", "temporal", "timezones", "dtype-struct", "dtype-array", "is_between", "is_in", "cum_agg", "rank", "semi_anti_join", "cross_join", "abs", "round_series", "trigonometry", "log", "product", "json", "list_any_all", "list_gather", "list_filter", "list_drop_nulls", "list_count", "list_sets", "list_to_struct", "top_k", "pivot", "rolling_window", "asof_join"] }
 polars-json = { version = "0.52.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

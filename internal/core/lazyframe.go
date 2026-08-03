@@ -32,26 +32,34 @@ const (
 	planSlice
 	planReverse
 	planDropNans
+	planUnpivot
 )
 
 type planNode struct {
-	kind         planKind
-	input        *planNode
-	right        *planNode
-	table        arrow.Table
-	source       sourceFactory
-	sourcePath   string
-	sourceFormat formatKind
-	sourceConfig scanConfig
-	exprs        []Expr
-	keys         []Expr
-	leftKeys     []Expr
-	rightKeys    []Expr
-	joinType     JoinType
-	suffix       string
-	columns      []string
-	limit        int64
-	offset       int64
+	kind            planKind
+	input           *planNode
+	right           *planNode
+	table           arrow.Table
+	source          sourceFactory
+	sourcePath      string
+	sourceFormat    formatKind
+	sourceConfig    scanConfig
+	exprs           []Expr
+	keys            []Expr
+	leftKeys        []Expr
+	rightKeys       []Expr
+	joinType        JoinType
+	suffix          string
+	asof            bool
+	asofStrategy    AsofStrategy
+	asofAllowExact  bool
+	asofCheckSorted bool
+	columns         []string
+	indexColumns    []string
+	variableName    string
+	valueName       string
+	limit           int64
+	offset          int64
 }
 
 type sourceFactory func(context.Context, *Engine) (recordSource, error)
@@ -166,6 +174,66 @@ func (lf *LazyFrame) Explode(columns ...string) *LazyFrame {
 // Unnest expands struct fields into columns.
 func (lf *LazyFrame) Unnest(columns ...string) *LazyFrame {
 	return lf.appendColumns(planUnnest, columns)
+}
+
+// Unpivot converts selected wide columns into variable/value rows. Columns in
+// index remain as identifiers; when on is empty, every non-index column is
+// unpivoted by the native engine.
+func (lf *LazyFrame) Unpivot(on, index []string, options ...UnpivotOption) *LazyFrame {
+	if lf == nil || lf.closed.Load() {
+		return &LazyFrame{err: ErrClosed}
+	}
+	if lf.err != nil {
+		return lf
+	}
+	config := unpivotConfig{variableName: "variable", valueName: "value"}
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
+	if len(on) == 0 && len(index) == 0 {
+		return newLazyFrame(lf.engine, lf.plan, fmt.Errorf("%w: Unpivot needs on or index columns", ErrInvalidPlan))
+	}
+	return newLazyFrame(lf.engine, &planNode{
+		kind:         planUnpivot,
+		input:        lf.plan,
+		columns:      append([]string(nil), on...),
+		indexColumns: append([]string(nil), index...),
+		variableName: config.variableName,
+		valueName:    config.valueName,
+	}, nil)
+}
+
+// Melt is an alias for Unpivot.
+func (lf *LazyFrame) Melt(on, index []string, options ...UnpivotOption) *LazyFrame {
+	return lf.Unpivot(on, index, options...)
+}
+
+// UnpivotOption configures the names of generated columns.
+type UnpivotOption func(*unpivotConfig)
+
+type unpivotConfig struct {
+	variableName string
+	valueName    string
+}
+
+// WithUnpivotVariableName sets the generated variable column name.
+func WithUnpivotVariableName(name string) UnpivotOption {
+	return func(config *unpivotConfig) {
+		if name != "" {
+			config.variableName = name
+		}
+	}
+}
+
+// WithUnpivotValueName sets the generated value column name.
+func WithUnpivotValueName(name string) UnpivotOption {
+	return func(config *unpivotConfig) {
+		if name != "" {
+			config.valueName = name
+		}
+	}
 }
 
 func (lf *LazyFrame) appendColumns(kind planKind, columns []string) *LazyFrame {
@@ -404,6 +472,11 @@ func (lf *LazyFrame) SinkIPCFile(ctx context.Context, destination string, option
 	return writeIPCBatches(ctx, lf, destination, true, options...)
 }
 
+// SinkArrow executes the plan and writes an Arrow IPC file.
+func (lf *LazyFrame) SinkArrow(ctx context.Context, destination string, options ...WriteOption) error {
+	return lf.SinkIPCFile(ctx, destination, options...)
+}
+
 // SinkIPCStream executes the plan and writes an Arrow IPC stream.
 func (lf *LazyFrame) SinkIPCStream(ctx context.Context, destination string, options ...WriteOption) error {
 	return writeIPCBatches(ctx, lf, destination, false, options...)
@@ -491,13 +564,19 @@ func (lf *LazyFrame) explainPlan() string {
 		case planGroupBy:
 			nodes = append(nodes, "GROUP_BY "+formatExprList(node.keys)+" AGG "+formatExprList(node.exprs))
 		case planJoin:
-			nodes = append(nodes, "JOIN "+node.joinType.String()+" ON "+formatExprList(node.leftKeys)+" = "+formatExprList(node.rightKeys))
+			if node.asof {
+				nodes = append(nodes, "JOIN_ASOF "+node.asofStrategy.String()+" ON "+formatExprList(node.leftKeys)+" = "+formatExprList(node.rightKeys))
+			} else {
+				nodes = append(nodes, "JOIN "+node.joinType.String()+" ON "+formatExprList(node.leftKeys)+" = "+formatExprList(node.rightKeys))
+			}
 		case planUnique:
 			nodes = append(nodes, "UNIQUE "+formatStringList(node.columns))
 		case planExplode:
 			nodes = append(nodes, "EXPLODE "+formatStringList(node.columns))
 		case planUnnest:
 			nodes = append(nodes, "UNNEST "+formatStringList(node.columns))
+		case planUnpivot:
+			nodes = append(nodes, "UNPIVOT "+formatStringList(node.columns)+" INDEX "+formatStringList(node.indexColumns))
 		}
 	}
 	for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
